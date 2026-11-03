@@ -1,0 +1,189 @@
+# =====================================================================
+# CRMF - Centralised Rig Monitoring Facility
+# Standalone, independently deployable stack (proposal §3, §5, §6).
+#
+#   Quickstart:
+#       docker compose up -d --build
+#   Portal:   http://localhost:${FRONTEND_PORT:-8090}
+#             sign in as admin with ADMIN_PASSWORD from .env (no default)
+#
+# Real rig-edge sync agents POST store-and-forward batches to this backend's
+# /ingest endpoint over the ONGC WAN.
+#
+# NO CONTROL PATH: this stack can never write a PLC tag or actuate equipment on
+# any rig. The only downstream channel is read-only operator TEXT messages
+# (central -> rig HMI, acknowledged by the operator); everything else is inbound
+# telemetry. Monitoring + one-way operator messaging, never remote control.
+# =====================================================================
+services:
+  # Canonical central store (proposal §6.4): TimescaleDB / PostgreSQL.
+  timescaledb:
+    # Pinned (was the moving `latest-pg15` tag): reproducible + volume-compatible
+    # with the PG15 data dir. Bump deliberately, staying on -pg15 (a -pg16 image
+    # will refuse an existing pg15 volume).
+    image: ${TIMESCALE_IMAGE:-timescale/timescaledb:2.28.3-pg15}
+    container_name: crmf_timescaledb
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${PGUSER:-crmf}
+      - POSTGRES_PASSWORD=${PGPASSWORD:?set PGPASSWORD in .env}
+      - POSTGRES_DB=${PGDATABASE:-crmf}
+    volumes:
+      - crmf_pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # Audit #2: runs AFTER init.sql (lexical "zz-") to give the least-privilege role
+      # crmf_app a login password, so the backend connects as crmf_app (not the owner)
+      # and cannot tamper with the append-only audit_log. Fresh-volume init only.
+      - ./db/app-role-password.sh:/docker-entrypoint-initdb.d/zz-app-role-password.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-crmf} -d ${PGDATABASE:-crmf}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    # Uncomment to inspect the DB from the host (localhost only):
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  # Ingestion + fleet portal API + live updates.
+  crmf-backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: crmf_backend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=6000
+      - FRONTEND_PORT=${FRONTEND_PORT:-8090}
+      - INGEST_PORT=${INGEST_PORT:-6000}
+      - CENTRAL_HOST=${CENTRAL_HOST:-}
+      - PGHOST=timescaledb
+      - PGPORT=5432
+      # Audit #2 (RESTORED): connect as the LEAST-PRIVILEGE app role crmf_app, NOT the
+      # schema owner (${PGUSER}). crmf_app has DML on operational tables + INSERT-only on
+      # audit_log and CANNOT drop the append-only trigger, so the audit trail is
+      # tamper-evident. Its password is set to ${PGPASSWORD} by db/app-role-password.sh at
+      # DB init. On an OFFLINE-TRANSFERRED volume where crmf_app has no password (the
+      # volume predates that init script), run db/app-role-password.sh once by hand rather
+      # than downgrading the backend to the owner role.
+      - PGUSER=crmf_app
+      - PGPASSWORD=${PGPASSWORD:?set PGPASSWORD in .env}
+      - PGDATABASE=${PGDATABASE:-crmf}
+      - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env}
+      # No weak default: the portal admin password must be set explicitly in .env.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      # Fail-closed ingest auth (#1): /ingest accepts a batch only if the bearer token
+      # matches a per-rig device token OR this global INGEST_TOKEN. NO DEFAULT — a
+      # published default token is equivalent to open ingest. At 50 rigs, prefer
+      # per-rig device tokens (see backend/scripts/provision-rigs.js) and leave this unset.
+      - INGEST_TOKEN=${INGEST_TOKEN:-}
+      # Open-ingest escape hatch (#1): when no token is configured, /ingest still
+      # REJECTS (401) unless ALLOW_OPEN_INGEST=true AND NODE_ENV != production.
+      # Left unset here => fail-closed. Never set this in production.
+      - ALLOW_OPEN_INGEST=${ALLOW_OPEN_INGEST:-}
+      # Full ONGC AHWR fleet (proposal §3: 50 rigs). SEED_RIG_NUMBERS pins the
+      # real commissioned rig numbers; the remainder seed as AHWR-50-<n>.
+      - FLEET_SIZE=${FLEET_SIZE:-50}
+      - SEED_RIG_NUMBERS=${SEED_RIG_NUMBERS:-}
+      - CONVENTIONAL_RIG_IDS=${CONVENTIONAL_RIG_IDS:-ROM-100-II}
+      - CONVENTIONAL_RIG_TOKEN=${CONVENTIONAL_RIG_TOKEN:-}
+      - CENTRAL_LATENCY_TARGET=${CENTRAL_LATENCY_TARGET:-30}
+      - OFFLINE_SEC=${OFFLINE_SEC:-120}
+      - CORS_ORIGIN=${CORS_ORIGIN:-}
+      # --- Alarm notifications (webhook/email). SMTP_* enables email. ---
+      - NOTIFY_ENABLED=${NOTIFY_ENABLED:-true}
+      - NOTIFY_MIN_SEVERITY=${NOTIFY_MIN_SEVERITY:-P1}
+      - NOTIFY_COOLDOWN_SEC=${NOTIFY_COOLDOWN_SEC:-120}
+      # --- Windows domain / Active Directory login (AUTH contract) ---
+      # Set AUTH_MODE=ldap or both and provide real LDAP_* values to enable AD login.
+      - AUTH_MODE=${AUTH_MODE:-local}             # local | ldap | both
+      - LDAP_URL=${LDAP_URL:-}
+      - LDAP_BIND_DN=${LDAP_BIND_DN:-}
+      - LDAP_BIND_PASSWORD=${LDAP_BIND_PASSWORD:-}
+      - LDAP_SEARCH_BASE=${LDAP_SEARCH_BASE:-}
+      - LDAP_SEARCH_FILTER=${LDAP_SEARCH_FILTER:-(|(uid={username})(cn={username})(sAMAccountName={username}))}
+      - LDAP_DOMAIN=${LDAP_DOMAIN:-ONGC}
+      - LDAP_DEFAULT_ROLE=${LDAP_DEFAULT_ROLE:-viewer}
+      - LDAP_ROLE_ADMIN=${LDAP_ROLE_ADMIN:-crmf-admins}
+      - LDAP_ROLE_OPERATOR=${LDAP_ROLE_OPERATOR:-crmf-operators}
+      - LDAP_ROLE_VIEWER=${LDAP_ROLE_VIEWER:-crmf-viewers}
+      - LDAP_STARTTLS=${LDAP_STARTTLS:-false}
+      # Default TRUE: enforce CA validation. Set false ONLY for a self-signed lab DC.
+      - LDAP_TLS_REJECT_UNAUTHORIZED=${LDAP_TLS_REJECT_UNAUTHORIZED:-true}
+    volumes:
+      # Where backend/scripts/provision-rigs.js writes issued per-rig credentials
+      # (--json / --out).
+      - crmf_provisioning:/provisioning
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    # Exposed so real rig-edge sync agents can reach /ingest over the WAN.
+    # In production this sits behind the API gateway / MQTT broker on the VPN.
+    # Loopback by default; set INGEST_BIND to the WAN-facing NIC to admit rigs.
+    ports:
+      - "${INGEST_BIND:-127.0.0.1}:${INGEST_PORT:-6000}:6000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:6000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+
+  # Fleet portal (React/Vite/MUI) behind nginx — proxies /api and /socket.io.
+  crmf-frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: crmf_frontend
+    restart: unless-stopped
+    # Loopback by default; set FRONTEND_BIND to publish on the ops LAN.
+    ports:
+      - "${FRONTEND_BIND:-127.0.0.1}:${FRONTEND_PORT:-8090}:80"
+    depends_on:
+      crmf-backend:
+        condition: service_healthy
+
+  # DEMO ONLY (RESTORED): webhook receiver standing in for an enterprise endpoint
+  # (Slack/Teams/PagerDuty/SMS gateway). The backend POSTs P1 alarm alerts here.
+  # Inspect with: docker exec crmf_notify_sink wget -qO- localhost:9020/received
+  notify-sink:
+    build: ./notify-sink
+    container_name: crmf_notify_sink
+    restart: unless-stopped
+    profiles: ["demo"]
+    environment:
+      - PORT=9020
+
+  # Read-only MCP server — agentic AI access to the CRMF fleet over the MCP
+  # streamable-HTTP transport. Mints a VIEWER JWT so central RBAC blocks every
+  # write; exposes only GET-backed fleet tools. MCP_API_KEY is REQUIRED.
+  crmf-mcp:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    container_name: crmf_mcp
+    restart: unless-stopped
+    cpus: 0.25
+    mem_limit: 192m
+    mem_reservation: 48m
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - BACKEND_URL=http://crmf-backend:6000
+      - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env}
+      - MCP_API_KEY=${MCP_API_KEY:?set MCP_API_KEY in .env (>=16 chars); it guards /mcp}
+    ports:
+      # Loopback-only by default. Point AI clients at http://127.0.0.1:8766/mcp ;
+      # set MCP_CENTRAL_BIND to expose on the ops LAN.
+      - "${MCP_CENTRAL_BIND:-127.0.0.1}:${MCP_CENTRAL_PORT:-8766}:3000"
+    depends_on:
+      crmf-backend:
+        condition: service_healthy
+
+volumes:
+  crmf_pgdata:
+  crmf_provisioning:
+
+
+

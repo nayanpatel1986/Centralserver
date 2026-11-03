@@ -1,0 +1,28 @@
+# Local credentials and live state
+.env
+portable.env
+portable-data/
+run/
+logs/
+*.pfx
+*.pem
+*.key
+*.crt
+*.cer
+*.der
+*passphrase*
+
+# Downloaded runtimes, dependencies, and generated frontend builds
+runtime/
+**/node_modules/
+frontend/dist/
+frontend/candidate-dist/
+frontend/dist-backup-*/
+**/coverage/
+*.log
+
+# Transfer packages and local launch artifacts
+*.zip
+*.zip.sha256.txt
+*.exe
+*.lnk
