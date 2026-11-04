@@ -484,7 +484,12 @@ async function ingestEtpMessage(ws, msg) {
     // rigs with their own provisioned device_token. Per-rig credentials only mean
     // something if the presented token is the one that gets checked.
     const effectiveToken = ws.etpToken || '';
-    const result = await ingestBatch({ rigId: batch.deviceId, token: effectiveToken, schemaVersion: batch.schemaVersion }, batch);
+    // The upgrade gate also admits the ETP server's own shared token; ingest must
+    // honour the same fallback or every batch from such a rig is rejected.
+    const result = await ingestBatch({
+        rigId: batch.deviceId, token: effectiveToken, schemaVersion: batch.schemaVersion,
+        sharedTokens: [String(config.etp20_server_token || '')],
+    }, batch);
     if (!result.ok) {
         status.ingestRejectedCount += 1;
         setStatus({ lastError: `ETP ingest rejected for ${batch.deviceId || 'unknown'}: ${result.error || result.code}` });
@@ -681,7 +686,7 @@ function attach(server, nextConfig = {}) {
         status.acceptedCount += 1;
         setStatus({ state: 'listening', lastClientAt: new Date().toISOString(), lastError: '' });
         if (ws.protocol === 'etp12.energistics.org') {
-            etp12Server.accept(ws, { rigId: ws.etpDeviceId, token: ws.etpToken });
+            etp12Server.accept(ws, { rigId: ws.etpDeviceId, token: ws.etpToken, sharedTokens: [String(config.etp20_server_token || '')] });
             ws.on('close', () => { clients.delete(ws); setStatus({ state: config.etp20_server_enabled ? 'listening' : 'disabled' }); });
             return;
         }

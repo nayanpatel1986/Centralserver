@@ -108,6 +108,10 @@ $env:PORT = if ($env:PORT) { $env:PORT } else { '8090' }
 $env:FRONTEND_DIST_DIR = $FrontendDist
 $env:FRONTEND_PORT = $env:PORT
 $env:INGEST_PORT = $env:PORT
+# The backend port is reachable on the LAN; only the local HTTPS proxy may set
+# X-Forwarded-For, so login rate limits key on the real client address.
+$env:TRUST_PROXY = 'loopback'
+$env:TILE_CACHE_DIR = Join-Path $Data 'tiles'
 
 foreach ($Required in @($Node, $PgCtl, $InitDb, $Psql, $Backend)) {
     if (-not (Test-Path -LiteralPath $Required)) { Fail "Missing portable runtime file: $Required. Run Build-Portable-Runtime.ps1 first." }

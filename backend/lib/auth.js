@@ -27,6 +27,35 @@ const OIDC_ENABLED = process.env.OIDC_ENABLED === 'true';
 const authMode = () => ldap.getMode();
 const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
 
+// Portal sessions ride in an HttpOnly cookie so page script (and any XSS) can't
+// read the JWT. Bearer headers still work for API/integration clients. A cookie
+// is sent automatically, so state-changing cookie requests must also carry
+// X-CRMF-Request: 1 — a custom header a cross-origin page can't add without a
+// CORS preflight, which the origin allowlist refuses.
+const SESSION_COOKIE = 'crmf_session';
+const CSRF_HEADER = 'x-crmf-request';
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+function readCookie(header, name) {
+    for (const part of String(header || '').split(';')) {
+        const i = part.indexOf('=');
+        if (i > 0 && part.slice(0, i).trim() === name) {
+            try { return decodeURIComponent(part.slice(i + 1).trim()); } catch { return null; }
+        }
+    }
+    return null;
+}
+
+function setSessionCookie(res, token, secure) {
+    const exp = jwt.decode(token)?.exp;
+    const maxAge = exp ? Math.max(0, exp - Math.floor(Date.now() / 1000)) : 0;
+    res.append('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`);
+}
+
+function clearSessionCookie(res, secure) {
+    res.append('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? '; Secure' : ''}`);
+}
+
 // Issue a signed portal JWT for an authenticated principal (local or directory).
 function issueToken(user) {
     const token = jwt.sign(user, JWT_SECRET, { expiresIn: TOKEN_TTL });
@@ -91,8 +120,13 @@ function verify(token) {
 function requireAuth(req, res, next) {
     (async () => {
         const hdr = req.headers.authorization || '';
-        const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
+        let token = hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
+        let viaCookie = false;
+        if (!token) { token = readCookie(req.headers.cookie, SESSION_COOKIE); viaCookie = !!token; }
         if (!token) return res.status(401).json({ error: 'unauthorized' });
+        if (viaCookie && !SAFE_METHODS.has(req.method) && req.headers[CSRF_HEADER] !== '1') {
+            return res.status(403).json({ error: 'missing request header' });
+        }
 
         let user = verify(token);
         if (!user && OIDC_ENABLED) user = await verifyOidc(token);
@@ -151,7 +185,7 @@ function socketAuth(socket, next) {
             socket.clientType = 'edge';
             return next();
         }
-        const token = auth.token;
+        const token = auth.token || readCookie(socket.handshake.headers.cookie, SESSION_COOKIE);
         const user = token && verify(token);
         if (!user) return next(new Error('unauthorized'));
         const { rows } = await query('SELECT role, asset_unit, disabled FROM users WHERE username = $1', [user.username]);
@@ -170,4 +204,4 @@ function socketAuth(socket, next) {
 
 const hash = (pw) => bcrypt.hashSync(pw, 10);
 
-module.exports = { login, verify, requireAuth, requireRole, roleMeets, socketAuth, hash };
+module.exports = { login, verify, requireAuth, requireRole, roleMeets, socketAuth, hash, setSessionCookie, clearSessionCookie };

@@ -229,6 +229,9 @@ export default function Dashboard({ hideEditControls = false, embedded = false }
     };
 
     useEffect(() => {
+        // Embedded in the central portal there is no /api/dashboard/layout (that
+        // endpoint lives on the rig edge); use the local / default layout.
+        if (embedded) { setGauges((prev) => (prev?.length ? prev : DEFAULT_DASHBOARD_GAUGES)); return undefined; }
         let cancelled = false;
         fetch(`${apiBaseUrl}/api/dashboard/layout?page=dashboard&t=${Date.now()}`)
             .then(res => res.json())
@@ -251,7 +254,7 @@ export default function Dashboard({ hideEditControls = false, embedded = false }
                 }
             });
         return () => { cancelled = true; };
-    }, [apiBaseUrl]);
+    }, [apiBaseUrl, embedded]);
 
     useEffect(() => {
         if (!socket) return;
@@ -262,6 +265,7 @@ export default function Dashboard({ hideEditControls = false, embedded = false }
 
     const saveGauges = (gs) => {
         persistDashboardGauges(gs);
+        if (embedded) return;
         fetch(`${apiBaseUrl}/api/dashboard/layout?page=dashboard`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ page: 'dashboard', gauges: gs }) }).catch(err => console.error("Save error:", err));
     };
 

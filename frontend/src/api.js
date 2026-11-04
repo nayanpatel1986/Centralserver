@@ -3,8 +3,11 @@ import axios from 'axios';
 // Same-origin: nginx proxies /api and /socket.io to the CRMF backend.
 axios.defaults.baseURL = '';
 
-const stored = localStorage.getItem('crmf_token');
-if (stored) axios.defaults.headers.common['Authorization'] = 'Bearer ' + stored;
+// The session JWT lives in an HttpOnly cookie set by /api/auth/login; page
+// script never sees it. State-changing requests must carry this header (the
+// backend's CSRF check for cookie sessions).
+axios.defaults.headers.common['X-CRMF-Request'] = '1';
+localStorage.removeItem('crmf_token'); // drop tokens stored by older builds
 
 let handling401 = false;
 axios.interceptors.response.use(
@@ -12,9 +15,7 @@ axios.interceptors.response.use(
     (error) => {
         if (error?.response?.status === 401 && !handling401) {
             handling401 = true;
-            localStorage.removeItem('crmf_token');
             localStorage.removeItem('crmf_user');
-            delete axios.defaults.headers.common['Authorization'];
             if (window.location.pathname !== '/login') window.location.assign('/login');
             else handling401 = false;
         }
@@ -31,19 +32,12 @@ const PHASE_COLORS = {
 };
 export const phaseColor = (phase) => PHASE_COLORS[String(phase || '').toUpperCase()] || '#64748b';
 
-export const setToken = (token) => {
-    if (token) {
-        localStorage.setItem('crmf_token', token);
-        axios.defaults.headers.common['Authorization'] = 'Bearer ' + token;
-    } else {
-        localStorage.removeItem('crmf_token');
-        delete axios.defaults.headers.common['Authorization'];
-    }
-};
+const unitP = (unit) => (unit && unit !== 'all' ? { unit } : {});
 
 export const api = {
     authInfo: () => axios.get('/api/auth/info').then((r) => r.data),
     login: (username, password) => axios.post('/api/auth/login', { username, password }).then((r) => r.data),
+    logout: () => axios.post('/api/auth/logout').then((r) => r.data),
     me: () => axios.get('/api/auth/me').then((r) => r.data),
     fleet: () => axios.get('/api/fleet').then((r) => r.data),
     summary: () => axios.get('/api/fleet/summary').then((r) => r.data),
@@ -65,8 +59,8 @@ export const api = {
     retryRigMessage: (id, messageId) => axios.post(`/api/rigs/${id}/messages/${messageId}/retry`).then((r) => r.data),
     alarms: (priority) => axios.get('/api/alarms', { params: { priority } }).then((r) => r.data),
     dataQuality: () => axios.get('/api/data-quality').then((r) => r.data),
-    workover: (hours) => axios.get('/api/workover', { params: { hours } }).then((r) => r.data),
-    workoverKpis: (days) => axios.get('/api/workover/kpis', { params: days ? { days } : {} }).then((r) => r.data),
+    workover: (hours, unit) => axios.get('/api/workover', { params: { hours, ...unitP(unit) } }).then((r) => r.data),
+    workoverKpis: (days, unit) => axios.get('/api/workover/kpis', { params: { ...(days ? { days } : {}), ...unitP(unit) } }).then((r) => r.data),
     governance: () => axios.get('/api/governance').then((r) => r.data),
     updateDeployment: (rigId, patch) => axios.patch(`/api/governance/deployment/${rigId}`, patch).then((r) => r.data),
     addEscalation: (body) => axios.post('/api/governance/escalations', body).then((r) => r.data),
@@ -75,14 +69,15 @@ export const api = {
     tags: () => axios.get('/api/config/tags').then((r) => r.data),
     rigsConfig: () => axios.get('/api/config/rigs').then((r) => r.data),
     // Reporting periods (audit #29): snapshot (default, current behaviour) | daily | weekly | monthly.
-    report: (period) => axios.get('/api/reports/fleet', { params: period ? { period } : {} }).then((r) => r.data),
+    report: (period, filter = {}) => axios.get('/api/reports/fleet', { params: { ...(period ? { period } : {}), ...filter } }).then((r) => r.data),
 
     // Maintenance & Reliability (audit #7).
     maintenance: (params) => axios.get('/api/maintenance', { params }).then((r) => r.data),
     maintenanceSummary: () => axios.get('/api/maintenance/summary').then((r) => r.data),
-    maintenanceKpis: (days) => axios.get('/api/maintenance/kpis', { params: days ? { days } : {} }).then((r) => r.data),
+    maintenanceKpis: (days, unit) => axios.get('/api/maintenance/kpis', { params: { ...(days ? { days } : {}), ...unitP(unit) } }).then((r) => r.data),
     maintenanceLog: (params) => axios.get('/api/maintenance/log', { params }).then((r) => r.data),
-    maintenanceFleetDaily: () => axios.get('/api/maintenance/fleet-daily').then((r) => r.data),
+    equipmentPerformance: (hours, days, unit) => axios.get('/api/equipment/performance', { params: { hours, days, ...unitP(unit) } }).then((r) => r.data),
+    maintenanceFleetDaily: (unit) => axios.get('/api/maintenance/fleet-daily', { params: unitP(unit) }).then((r) => r.data),
     updateMaintenance: (id, patch) => axios.patch(`/api/maintenance/${id}`, patch).then((r) => r.data),
 
     // User & Access Management (audit #8) — admin-only on the backend.

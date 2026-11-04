@@ -1,0 +1,13 @@
+# Keep host build output, dependencies and local state out of image builds:
+# a macOS node_modules copied over the Linux install breaks native binaries.
+**/node_modules
+frontend/dist
+backend/data
+portable-data
+runtime
+logs
+run
+.env
+portable.env
+*.zip
+.git

@@ -88,10 +88,13 @@ export function RigDataProvider({ rigId, intervalMs = 2000, children }) {
             const updateRigId = row?.rigId || row?.rig_id;
             if (updateRigId !== rigId) return;
             if (refreshTimer.current) return;
+            // rig_live already carries each batch's data; this refetch only needs to
+            // catch state changes (e.g. the rig going offline), so coalesce to 2 s
+            // instead of re-fetching /live after every batch.
             refreshTimer.current = setTimeout(() => {
                 refreshTimer.current = null;
                 load();
-            }, 120);
+            }, 2000);
         };
         socket.on('rig_live', onRigLive);
         socket.on('fleet_update', onFleetUpdate);

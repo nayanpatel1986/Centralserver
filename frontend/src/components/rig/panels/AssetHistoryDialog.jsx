@@ -57,7 +57,7 @@ export default function AssetHistoryDialog({ asset, snapshot, open, onClose }) {
         const wos = Array.isArray(snapshot?.workOrders) ? snapshot.workOrders : [];
         return [
             ...log.filter((l) => String(l.logType || '').toUpperCase() !== 'OPERATIONS' && matchesAsset(l, asset))
-                .map((l) => ({ kind: 'LOG', at: l.at || l.ts, text: l.text, by: l.by, ref: l.notificationNo || l.woNo || '—' })),
+                .map((l) => ({ kind: 'LOG', at: l.at || l.ts || l.date, text: l.text ?? l.entry, by: l.by, ref: l.notificationNo || l.woNo || '—' })),
             ...wos.filter((w) => matchesAsset(w, asset))
                 .map((w) => ({ kind: w.type || 'WO', at: w.raisedAt, text: w.title, by: w.assignedTo, ref: w.notificationNo || w.woNo || '—' })),
         ].sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));

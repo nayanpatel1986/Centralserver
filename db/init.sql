@@ -602,12 +602,24 @@ COMMENT ON ROLE crmf_app IS
 GRANT USAGE ON SCHEMA public TO crmf_app;
 
 -- Operational tables: full DML (SELECT/INSERT/UPDATE/DELETE).
+-- Data coverage (Data Quality Monitor): one row per rig per minute that holds
+-- telemetry, stamped with when central first received it. Outage = minutes
+-- with no row; backfill = rows received well after their minute (the edge
+-- replaying its store-and-forward buffer). Pruned to 35 days by the backend.
+CREATE TABLE IF NOT EXISTS rig_data_coverage (
+    rig_id      TEXT        NOT NULL,
+    minute      TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (rig_id, minute)
+);
+CREATE INDEX IF NOT EXISTS rig_data_coverage_recv_idx ON rig_data_coverage (rig_id, received_at DESC);
+
 GRANT SELECT, INSERT, UPDATE, DELETE ON
     rigs, rig_latest, telemetry, events, connections, tags,
     deployment_status, escalations, decisions, value_metrics,
     maintenance_record, users, notification_channels, notifications,
     app_settings, user_sessions, wells, well_runs, rig_messages, rig_cmms,
-    rig_downtime, rig_maint_log
+    rig_downtime, rig_maint_log, rig_data_coverage
     TO crmf_app;
 
 -- The continuous aggregate is read-only for the app.

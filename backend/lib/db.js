@@ -166,6 +166,21 @@ async function ensureAppMigrations() {
         )
     `);
     await tryDdl(`CREATE INDEX IF NOT EXISTS rig_maint_log_rig_at_idx ON rig_maint_log(rig_id, at_ts DESC)`);
+    await tryDdl(`
+        CREATE TABLE IF NOT EXISTS rig_data_coverage (
+            rig_id TEXT NOT NULL,
+            minute TIMESTAMPTZ NOT NULL,
+            received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (rig_id, minute)
+        )
+    `);
+    await tryDdl(`CREATE INDEX IF NOT EXISTS rig_data_coverage_recv_idx ON rig_data_coverage (rig_id, received_at DESC)`);
+    // Optional: the Data Quality outage/backfill view degrades to "unavailable"
+    // without it (no boot failure), so an older crmf_app-only volume keeps working.
+    if (!(await pool.query("SELECT to_regclass('public.rig_data_coverage') AS oid")).rows[0].oid) {
+        console.warn('[db] rig_data_coverage is missing; Data Quality outage/backfill tracking is off. ' +
+            'Apply the rig_data_coverage section of db/init.sql once as the DB owner.');
+    }
     await tryDdl(`ALTER TABLE rigs ADD COLUMN IF NOT EXISTS sender_epoch TEXT`);
     await tryDdl(`ALTER TABLE rigs ADD COLUMN IF NOT EXISTS seq_conflict_at TIMESTAMPTZ`);
     await tryDdl(`ALTER TABLE rigs ADD COLUMN IF NOT EXISTS rig_type TEXT NOT NULL DEFAULT 'AHWR_WORKOVER'`);

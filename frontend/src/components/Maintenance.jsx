@@ -10,7 +10,7 @@ import {
 } from 'recharts';
 import ErrorBoundary from './ErrorBoundary';
 import { api } from '../api';
-import { KpiCard, fmtNum } from './common';
+import { KpiCard, fmtNum, UnitFilter } from './common';
 
 
 // Auto-scaling durations (real fleets read in hours/days; compressed demo data stays legible).
@@ -26,6 +26,7 @@ export default function Maintenance() {
     const [daily, setDaily] = useState(null);   // rig-wise last-day log + NPT rollup
     const [kpis, setKpis] = useState(null);     // reliability KPIs (availability / MTBF / MTTR / Pareto)
     const [days, setDays] = useState(30);
+    const [unit, setUnit] = useState('all');
     // Log browser (rig-wise / asset-wise over the accumulated CMMS history).
     const [logKind, setLogKind] = useState('maint');    // 'maint' | 'downtime'
     const [logRig, setLogRig] = useState('all');
@@ -35,17 +36,17 @@ export default function Maintenance() {
 
     const load = useCallback(() => {
         setErr('');
-        api.maintenanceFleetDaily()
+        api.maintenanceFleetDaily(unit)
             .then(setDaily)
             .catch((e) => { if (e?.response?.status !== 401) setErr(e?.response?.data?.error || 'Failed to load maintenance data'); })
             .finally(() => setLoading(false));
-    }, []);
+    }, [unit]);
 
     useEffect(() => { setLoading(true); load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
 
     const loadKpis = useCallback(() => {
-        api.maintenanceKpis(days).then(setKpis).catch(() => {});
-    }, [days]);
+        api.maintenanceKpis(days, unit).then(setKpis).catch(() => {});
+    }, [days, unit]);
     useEffect(() => { loadKpis(); const t = setInterval(loadKpis, 30000); return () => clearInterval(t); }, [loadKpis]);
 
     // Log browser fetch — debounced so free-text search doesn't spam the API.
@@ -57,10 +58,11 @@ export default function Maintenance() {
                 rig: logRig === 'all' ? undefined : logRig,
                 asset: logAsset === 'all' ? undefined : logAsset,
                 q: logQ || undefined,
+                unit: unit === 'all' ? undefined : unit,
             }).then(setLog).catch(() => {});
         }, 350);
         return () => clearTimeout(t);
-    }, [logKind, logRig, logAsset, logQ, days]);
+    }, [logKind, logRig, logAsset, logQ, days, unit]);
 
     const rigSort = (a, b) => a.localeCompare(b, undefined, { numeric: true });
 
@@ -70,6 +72,7 @@ export default function Maintenance() {
         <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto' }}>
             <Stack direction="row" alignItems="center" spacing={2} mb={2} flexWrap="wrap" useFlexGap>
                 <Typography variant="h5" fontWeight={800} sx={{ flexGrow: 1 }}>Maintenance &amp; Reliability</Typography>
+                <UnitFilter value={unit} onChange={(u) => { setUnit(u); setLogRig('all'); }} />
                 <Typography variant="caption" color="text.secondary">KPI window</Typography>
                 <ToggleButtonGroup size="small" exclusive value={days} onChange={(_e, v) => v && setDays(v)}>
                     <ToggleButton value={7}>7d</ToggleButton>

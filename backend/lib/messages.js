@@ -12,6 +12,14 @@ function cleanText(value) {
     return text;
 }
 
+// Rig crew identity for an acknowledgement or reply. Required: every crew
+// response is stamped with the person who sent it (the time is the server's).
+function cleanCrewUser(value) {
+    const user = String(value || '').replace(/[\x00-\x1F\x7F]/g, '').trim().slice(0, 120);
+    if (!user) throw Object.assign(new Error('crew user stamp is required'), { status: 400 });
+    return user;
+}
+
 function cleanType(value) {
     const type = String(value || 'General').trim();
     return TYPES.has(type) ? type : 'General';
@@ -89,13 +97,13 @@ async function acknowledge(messageId, rigId, acknowledgedBy) {
              delivered_at = COALESCE(delivered_at, now()), updated_at = now(), failure_reason = NULL
          WHERE message_id = $1 AND target_rig_id = $2
          RETURNING ${publicCols}`,
-        [messageId, rigId, String(acknowledgedBy || 'edge')]);
+        [messageId, rigId, cleanCrewUser(acknowledgedBy)]);
     return rows[0] || null;
 }
 
 async function recordReply(messageId, rigId, payload = {}) {
     const replyText = cleanText(payload.replyText ?? payload.text);
-    const repliedBy = String(payload.repliedBy || payload.user || 'edge').slice(0, 120);
+    const repliedBy = cleanCrewUser(payload.repliedBy || payload.user);
     const { rows } = await query(
         `UPDATE rig_messages
          SET status = 'replied', replied_at = now(), replied_by = $3, reply_text = $4,
@@ -110,10 +118,10 @@ async function retry(messageId, rigId) {
     const { rows } = await query(
         `UPDATE rig_messages
          SET status = 'sent', retry_count = retry_count + 1, failed_at = NULL, failure_reason = NULL, updated_at = now()
-         WHERE message_id = $1 AND target_rig_id = $2 AND status <> 'acknowledged'
+         WHERE message_id = $1 AND target_rig_id = $2 AND status NOT IN ('acknowledged', 'replied')
          RETURNING ${publicCols}`,
         [messageId, rigId]);
-    if (!rows[0]) throw Object.assign(new Error('message not found or already acknowledged'), { status: 404 });
+    if (!rows[0]) throw Object.assign(new Error('message not found or already acknowledged/replied'), { status: 404 });
     return rows[0];
 }
 

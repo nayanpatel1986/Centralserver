@@ -111,7 +111,7 @@ function tsMillis(raw) {
 const RIG_ROW_COLS = `rig_id, device_token, last_seq, sender_epoch, seq_conflict_at,
                     alarm_active, alarm_p1, alarm_highest, active_job`;
 
-async function ensureRig(client, rigId, token, schemaVersion) {
+async function ensureRig(client, rigId, token, schemaVersion, sharedTokens = [GLOBAL_INGEST_TOKEN]) {
     // FOR NO KEY UPDATE: ensureRig is reached only when the transaction's opening
     // locked SELECT found no row, but a concurrent first-contact transaction may
     // have committed the rig in between. Returning that row UNLOCKED let the rest
@@ -126,7 +126,7 @@ async function ensureRig(client, rigId, token, schemaVersion) {
     // share one secret — and it hides them from `provision-rigs.js`, which skips
     // rigs that already have a token. Leave it NULL so the rig keeps using the
     // shared fallback until a real per-rig token is issued.
-    const perRigToken = token && token !== GLOBAL_INGEST_TOKEN ? token : null;
+    const perRigToken = token && !sharedTokens.includes(token) ? token : null;
     // RETURNING tells the truth about whether WE created the row. ON CONFLICT DO
     // NOTHING with an unconditional `_new: true` reported a fresh registration —
     // and fired the registration audit — even when a concurrent transaction had
@@ -178,12 +178,20 @@ function authorize(rig, token) {
 // unknown rig first (audit #1: only auto-register authorized devices). When a
 // device_token has been provisioned for an existing rig, that wins; otherwise we
 // fall back to the global INGEST_TOKEN / open-demo policy.
-function authorizeKnown(rig, token) {
+function authorizeKnown(rig, token, sharedTokens = [GLOBAL_INGEST_TOKEN]) {
     // Same precedence as authorize(): per-rig credential wins, shared token is
     // only the not-yet-provisioned fallback.
     if (rig && rig.device_token) return safeEqual(token, rig.device_token);
-    if (GLOBAL_INGEST_TOKEN) return safeEqual(token, GLOBAL_INGEST_TOKEN);
+    const shared = sharedTokens.filter(Boolean);
+    if (shared.length) return shared.map((t) => safeEqual(token, t)).includes(true);
     return ALLOW_OPEN_INGEST;
+}
+
+// Shared (fleet-wide) fallback tokens for this caller: always INGEST_TOKEN, plus
+// any transport-specific shared token the caller authenticated against (the ETP
+// server token), so a rig admitted with it is not then rejected batch by batch.
+function sharedTokensFor(ctx) {
+    return [...new Set([GLOBAL_INGEST_TOKEN, ...((ctx && ctx.sharedTokens) || [])].filter(Boolean))];
 }
 
 // Rows per INSERT statement. One giant UNNEST over an unbounded replay drain
@@ -254,6 +262,47 @@ async function telemetryHasSource() {
 
 // Latest snapshot wins; merge over the existing cache so a partial batch never
 // wipes previously-seen tags. Compares ts NUMERICALLY (audit #32).
+// Data coverage for the Data Quality Monitor: each minute this batch carries
+// telemetry for, stamped with when central first received it (ON CONFLICT
+// keeps the first receipt, so a replay of an already-covered minute is not
+// mistaken for backfill). Probed once, like telemetryHasSource: a volume
+// without the table (crmf_app cannot create it) simply skips coverage.
+let coverageProbe = null;
+async function coverageAvailable() {
+    if (!coverageProbe) {
+        coverageProbe = query("SELECT to_regclass('public.rig_data_coverage') IS NOT NULL AS ok")
+            .then((r) => !!r.rows[0].ok).catch(() => false);
+    }
+    return coverageProbe;
+}
+
+async function recordCoverage(client, rigId, channels, nowIso) {
+    if (!(await coverageAvailable())) return;
+    const minutes = new Set();
+    const now = Date.parse(nowIso);
+    for (const snap of channels) {
+        if (!snap || !snap.values) continue;
+        const t = Date.parse(coerceTsIso(snap.ts) || nowIso);
+        // Ignore far-future stamps (bad rig clock) — they would read as coverage
+        // for minutes that have not happened yet.
+        if (Number.isFinite(t) && t <= now + MAX_FUTURE_SKEW_MS) minutes.add(Math.floor(t / 60_000) * 60_000);
+    }
+    if (!minutes.size) return;
+    // SAVEPOINT: coverage is secondary bookkeeping and must never abort the batch.
+    await client.query('SAVEPOINT coverage');
+    try {
+        await client.query(
+            `INSERT INTO rig_data_coverage (rig_id, minute)
+             SELECT $1, unnest($2::timestamptz[])
+             ON CONFLICT (rig_id, minute) DO NOTHING`,
+            [rigId, [...minutes].map((m) => new Date(m).toISOString())]);
+        await client.query('RELEASE SAVEPOINT coverage');
+    } catch (e) {
+        await client.query('ROLLBACK TO SAVEPOINT coverage');
+        console.warn(`[ingest] ${rigId}: coverage write failed: ${e.message}`);
+    }
+}
+
 function latestSnapshot(channels) {
     let best = null, bestMs = -Infinity;
     for (const snap of channels || []) {
@@ -651,6 +700,7 @@ async function persistCmmsHistory(client, rigId, snap) {
                 `INSERT INTO rig_downtime (rig_id, record_id, asset_id, asset, reason_code, start_ts, end_ts, duration_min, notes, updated_at)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
                  ON CONFLICT (rig_id, record_id) DO UPDATE SET
+                   start_ts = COALESCE(EXCLUDED.start_ts, rig_downtime.start_ts),
                    end_ts = EXCLUDED.end_ts, duration_min = EXCLUDED.duration_min,
                    reason_code = COALESCE(EXCLUDED.reason_code, rig_downtime.reason_code),
                    notes = COALESCE(EXCLUDED.notes, rig_downtime.notes), updated_at = now()`,
@@ -659,17 +709,26 @@ async function persistCmmsHistory(client, rigId, snap) {
                  Number.isFinite(Number(d.durationMin)) ? Number(d.durationMin) : null, d.notes || null]);
         }
         for (const l of Array.isArray(snap.logbook) ? snap.logbook.slice(0, 300) : []) {
-            const id = String(l.id || `${l.at || ''}-${(l.text || '').slice(0, 40)}`).slice(0, 160);
+            // Edge builds name these fields differently (text|entry, at|ts|date).
+            const text = l.text ?? l.entry ?? '';
+            const at = l.at || l.ts || l.date;
+            const id = String(l.id || `${at || ''}-${String(text).slice(0, 40)}`).slice(0, 160);
             if (!id) continue;
             await client.query(
                 `INSERT INTO rig_maint_log (rig_id, entry_id, log_type, category, asset_id, asset, text, by_who, shift, notification_no, at_ts, updated_at)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
                  ON CONFLICT (rig_id, entry_id) DO UPDATE SET
                    text = EXCLUDED.text, notification_no = COALESCE(EXCLUDED.notification_no, rig_maint_log.notification_no),
+                   log_type = COALESCE(EXCLUDED.log_type, rig_maint_log.log_type),
+                   category = COALESCE(EXCLUDED.category, rig_maint_log.category),
+                   asset_id = EXCLUDED.asset_id, asset = EXCLUDED.asset,
+                   by_who = COALESCE(EXCLUDED.by_who, rig_maint_log.by_who),
+                   shift = COALESCE(EXCLUDED.shift, rig_maint_log.shift),
+                   at_ts = COALESCE(EXCLUDED.at_ts, rig_maint_log.at_ts),
                    updated_at = now()`,
                 [rigId, id, l.logType || null, l.category || null, l.assetId || null, l.asset || null,
-                 String(l.text || '').slice(0, 500), l.by || null, l.shift || null,
-                 l.notificationNo || l.woNo || null, coerceTsIso(l.at || l.ts)]);
+                 String(text || '').slice(0, 500), l.by || null, l.shift || null,
+                 l.notificationNo || l.workOrderNo || l.woNo || null, coerceTsIso(at)]);
         }
     } catch (e) {
         // Rethrow: the caller's SAVEPOINT contains it. Swallowing here would leave
@@ -837,6 +896,7 @@ async function ingestBatch(ctx, batch) {
     // holding its rigs row lock while the probe waited for a second connection.
     // Out here it needs no concurrent client and caches for the process lifetime.
     await telemetryHasSource().catch(() => {});
+    await coverageAvailable();
     let last;
     for (let attempt = 1; attempt <= INGEST_ATTEMPTS; attempt++) {
         last = await ingestBatchOnce(ctx, batch, nowIso);
@@ -848,7 +908,8 @@ async function ingestBatch(ctx, batch) {
     return last;
 }
 
-async function ingestBatchOnce({ rigId, token, schemaVersion }, batch, nowIso) {
+async function ingestBatchOnce({ rigId, token, schemaVersion, sharedTokens: extraShared }, batch, nowIso) {
+    const sharedTokens = sharedTokensFor({ sharedTokens: extraShared });
     rigId = batch.deviceId || rigId;
     if (!rigId) return { ok: false, code: 400, error: 'missing deviceId' };
     // Bound the identity: rigId flows into the rigs PK, Prometheus label values,
@@ -932,21 +993,21 @@ async function ingestBatchOnce({ rigId, token, schemaVersion }, batch, nowIso) {
              FOR NO KEY UPDATE`, [rigId]);
         let rig = existing[0] || null;
 
-        if (!authorizeKnown(rig, token)) {
+        if (!authorizeKnown(rig, token, sharedTokens)) {
             await client.query('ROLLBACK').catch(() => {});
             return { ok: false, code: 401, error: 'unauthorized device' };
         }
 
         // Authorized: now it is safe to auto-register an unknown device.
         if (!rig) {
-            const r = await ensureRig(client, rigId, token, schemaVersion || batch.schemaVersion);
+            const r = await ensureRig(client, rigId, token, schemaVersion || batch.schemaVersion, sharedTokens);
             rig = r;
             registered = !!r._new;
             // Registration race: another transaction created this rig first and
             // ensureRig returned ITS row. The earlier authorize ran against a
             // null rig (shared-token path); the real row may carry a provisioned
             // device_token that must now be honoured.
-            if (!r._new && !authorizeKnown(rig, token)) {
+            if (!r._new && !authorizeKnown(rig, token, sharedTokens)) {
                 await client.query('ROLLBACK').catch(() => {});
                 return { ok: false, code: 401, error: 'unauthorized device' };
             }
@@ -1024,6 +1085,7 @@ async function ingestBatchOnce({ rigId, token, schemaVersion }, batch, nowIso) {
 
         const source = String(schemaVersion || batch.schemaVersion || '').startsWith('etp') ? 'etp' : 'sync';
         const insertedCounts = await insertTelemetry(client, rigId, channels, nowIso, source);
+        await recordCoverage(client, rigId, channels, nowIso);
         points = insertedCounts.inserted;
         pointsAttempted = insertedCounts.attempted;
 
