@@ -50,6 +50,7 @@ const cmmsFallback = require('./lib/cmmsFallback');
 const ahwr150Hpu = require('./lib/ahwr150Hpu');
 const tiles = require('./lib/tiles');
 const equipment = require('./lib/equipment');
+const dataQuality = require('./lib/dataQuality');
 
 const PORT = Number(process.env.PORT || 6000);
 const METRICS_ENABLED = process.env.METRICS_ENABLED !== 'false'; // default ON
@@ -419,8 +420,11 @@ function buildApiRouter() {
         try { res.json(await fn(req)); }
         catch (e) {
             const status = e.status || 500;
-            if (status >= 500) console.error('[api] error:', e.message);
-            res.status(status).json({ error: e.message });
+            if (status >= 500) console.error('[api] error:', req.method, req.originalUrl, e.message);
+            // Errors thrown with an explicit status are meant for the user; anything
+            // else is unexpected (often a raw database/driver error) and must not
+            // leak schema details to the client (audit #11).
+            res.status(status).json({ error: e.status ? e.message : 'internal error' });
         }
     };
 
@@ -521,11 +525,11 @@ function buildApiRouter() {
         return row;
     }));
     r.get('/alarms', wrap((req) => fleet.getAlarms({ priority: req.query.priority })));
-    r.get('/data-quality', wrap(() => fleet.getDataQuality()));
-    r.get('/workover', wrap((req) => gov.getWorkover({ hours: req.query.hours })));
+    r.get('/data-quality', wrap((req) => dataQuality.getDataQuality({ tz: req.query.tz })));
+    r.get('/workover', wrap((req) => gov.getWorkover({ hours: req.query.hours, unit: req.query.unit })));
     // Fleet workover KPIs (avg days/well, NPT/well, make-up & break-out times,
     // diesel per well/month + 6-month trend). Read-only.
-    r.get('/workover/kpis', wrap((req) => gov.getWorkoverKpis({ days: req.query.days, tz: req.query.tz })));
+    r.get('/workover/kpis', wrap((req) => gov.getWorkoverKpis({ days: req.query.days, tz: req.query.tz, unit: req.query.unit })));
 
     // ----- Well management (WITSML-inspired; proposal §6.1 well drill-down) -----
     // A WELL is a first-class lifecycle entity; a WELL_RUN links telemetry to a
@@ -784,10 +788,10 @@ function buildApiRouter() {
     r.get('/maintenance/summary', wrap(() => maint.maintenanceSummary()));
     // Equipment performance: each equipment class compared across the fleet
     // (condition from telemetry, reliability from downtime, PM from CMMS).
-    r.get('/equipment/performance', wrap((req) => equipment.getEquipmentPerformance({ hours: req.query.hours, days: req.query.days })));
+    r.get('/equipment/performance', wrap((req) => equipment.getEquipmentPerformance({ hours: req.query.hours, days: req.query.days, unit: req.query.unit })));
     // Fleet reliability KPIs (availability, MTBF/MTTR, NPT, Pareto, monthly
     // trend + CMMS posture). Read-only.
-    r.get('/maintenance/kpis', wrap((req) => gov.getMaintenanceKpis({ days: req.query.days, tz: req.query.tz })));
+    r.get('/maintenance/kpis', wrap((req) => gov.getMaintenanceKpis({ days: req.query.days, tz: req.query.tz, unit: req.query.unit })));
     // Filterable LOG BROWSER over the accumulated CMMS history: maintenance-log
     // entries or downtime/NPT records, rig-wise and asset-wise. Read-only.
     r.get('/maintenance/log', wrap(async (req) => {
@@ -797,12 +801,14 @@ function buildApiRouter() {
         const q = String(req.query.q || '').trim();
         const kind = req.query.kind === 'downtime' ? 'downtime' : 'maint';
         const win = `${days} days`;
+        const unitIds = await fleet.rigIdsForUnit(req.query.unit);
 
         let rows;
         if (kind === 'maint') {
             const conds = ['m.at_ts > now() - ($1)::interval'];
             const vals = [win];
             if (rig) { vals.push(rig); conds.push(`m.rig_id = $${vals.length}`); }
+            if (unitIds) { vals.push(unitIds); conds.push(`m.rig_id = ANY($${vals.length})`); }
             if (asset) { vals.push(asset); conds.push(`(m.asset = $${vals.length} OR m.asset_id = $${vals.length})`); }
             if (q) { vals.push(`%${q}%`); conds.push(`(m.text ILIKE $${vals.length} OR m.notification_no ILIKE $${vals.length} OR m.by_who ILIKE $${vals.length})`); }
             const r2 = await query(
@@ -818,6 +824,7 @@ function buildApiRouter() {
             const conds = ['d.start_ts > now() - ($1)::interval'];
             const vals = [win];
             if (rig) { vals.push(rig); conds.push(`d.rig_id = $${vals.length}`); }
+            if (unitIds) { vals.push(unitIds); conds.push(`d.rig_id = ANY($${vals.length})`); }
             if (asset) { vals.push(asset); conds.push(`(d.asset = $${vals.length} OR d.asset_id = $${vals.length})`); }
             if (q) { vals.push(`%${q}%`); conds.push(`(d.reason_code ILIKE $${vals.length} OR d.notes ILIKE $${vals.length})`); }
             const r2 = await query(
@@ -861,7 +868,8 @@ function buildApiRouter() {
     // Sourced from rig_downtime / rig_maint_log, which accumulate the point-in-time
     // CMMS snapshots each edge ships (rig_cmms holds only the latest).
     r.get('/maintenance/fleet-daily', wrap(async (req) => {
-        const tz = String(req.query.tz || 'Asia/Kolkata');
+        const tz = /^[A-Za-z0-9_/+:-]{1,64}$/.test(String(req.query.tz || '')) ? String(req.query.tz) : 'Asia/Kolkata';
+        const unitIds = await fleet.rigIdsForUnit(req.query.unit);
         const { rows } = await query(
             `WITH fy AS (
                  SELECT CASE WHEN EXTRACT(MONTH FROM now() AT TIME ZONE $1) >= 4
@@ -883,6 +891,7 @@ function buildApiRouter() {
                    FROM rig_maint_log WHERE at_ts IS NOT NULL GROUP BY rig_id
              )
              SELECT r.rig_id, r.name, r.status, r.asset_unit, r.field,
+                    (SELECT start_date FROM fy)     AS fy_start,
                     COALESCE(n.npt_prev_day_min, 0) AS npt_prev_day_min,
                     COALESCE(n.npt_fy_min, 0)       AS npt_fy_min,
                     COALESCE(n.npt_open, 0)         AS npt_open,
@@ -901,13 +910,14 @@ function buildApiRouter() {
                FROM rigs r
                LEFT JOIN npt     n  ON n.rig_id  = r.rig_id
                LEFT JOIN lastday ld ON ld.rig_id = r.rig_id
-              ORDER BY r.rig_id`, [tz]);
+              WHERE ($2::text[] IS NULL OR r.rig_id = ANY($2))
+              ORDER BY r.rig_id`, [tz, unitIds]);
         const fmt = (v) => Number(Number(v || 0).toFixed(1));
         return {
             timezone: tz,
-            financialYearStart: new Date().getMonth() + 1 >= 4
-                ? `${new Date().getFullYear()}-04-01`
-                : `${new Date().getFullYear() - 1}-04-01`,
+            // From the query, in the operating timezone (not the server's clock zone).
+            financialYearStart: rows[0]?.fy_start ? String(rows[0].fy_start instanceof Date
+                ? rows[0].fy_start.toISOString() : rows[0].fy_start).slice(0, 10) : null,
             rigs: rows.map((r) => ({
                 rigId: r.rig_id, name: r.name, status: r.status,
                 assetUnit: r.asset_unit, field: r.field,
@@ -978,13 +988,14 @@ function buildApiRouter() {
          FROM rigs ORDER BY rig_id`)).rows));
 
     // ----- Reporting (proposal §6.1) — JSON (period-aware, audit #29) + CSV -----
-    r.get('/reports/fleet', wrap((req) => gov.getFleetReportPeriod(req.query.period)));
+    const reportFilter = (q) => ({ unit: q.unit, rig: q.rig });
+    r.get('/reports/fleet', wrap((req) => gov.getFleetReportPeriod(req.query.period, reportFilter(req.query))));
     r.get('/reports/fleet.csv', async (req, res) => {
         try {
             // Period-aware export (audit #29 / finding #3): match the JSON report's window
             // instead of always emitting the snapshot. Columns are derived from the row
             // shape since snapshot vs daily/weekly/monthly rows carry different fields.
-            const { period, rows } = await gov.getFleetReportPeriod(req.query.period);
+            const { period, rows } = await gov.getFleetReportPeriod(req.query.period, reportFilter(req.query));
             const cols = rows.length ? Object.keys(rows[0]) : ['rig_id'];
             const csv = [cols.join(',')].concat(rows.map((row) => cols.map((c) => {
                 let v = row[c] == null ? '' : String(row[c]);
@@ -1024,6 +1035,7 @@ if (FRONTEND_DIST_DIR && fs.existsSync(FRONTEND_DIST_DIR)) {
 // --------------------------------------------------------------------
 let summaryTimer = null;
 let sweepTimer = null;
+let lastCoveragePrune = 0;
 let shuttingDown = false;
 
 async function main() {
@@ -1051,6 +1063,11 @@ async function main() {
             }
             if (flipped.length) io.to(PORTAL_ROOM).emit('fleet_summary', await fleet.getFleetSummary());
         } catch (e) { /* ignore */ }
+        // Hourly: trim the data-coverage ledger behind the Data Quality Monitor.
+        if (Date.now() - lastCoveragePrune > 3_600_000) {
+            lastCoveragePrune = Date.now();
+            dataQuality.pruneCoverage().catch((e) => console.warn('[data-quality] prune failed:', e.message));
+        }
     }, 15_000);
 
     // Periodic summary heartbeat so KPI cards stay live even on a quiet fleet.

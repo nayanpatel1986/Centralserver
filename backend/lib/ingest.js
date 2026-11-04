@@ -262,6 +262,47 @@ async function telemetryHasSource() {
 
 // Latest snapshot wins; merge over the existing cache so a partial batch never
 // wipes previously-seen tags. Compares ts NUMERICALLY (audit #32).
+// Data coverage for the Data Quality Monitor: each minute this batch carries
+// telemetry for, stamped with when central first received it (ON CONFLICT
+// keeps the first receipt, so a replay of an already-covered minute is not
+// mistaken for backfill). Probed once, like telemetryHasSource: a volume
+// without the table (crmf_app cannot create it) simply skips coverage.
+let coverageProbe = null;
+async function coverageAvailable() {
+    if (!coverageProbe) {
+        coverageProbe = query("SELECT to_regclass('public.rig_data_coverage') IS NOT NULL AS ok")
+            .then((r) => !!r.rows[0].ok).catch(() => false);
+    }
+    return coverageProbe;
+}
+
+async function recordCoverage(client, rigId, channels, nowIso) {
+    if (!(await coverageAvailable())) return;
+    const minutes = new Set();
+    const now = Date.parse(nowIso);
+    for (const snap of channels) {
+        if (!snap || !snap.values) continue;
+        const t = Date.parse(coerceTsIso(snap.ts) || nowIso);
+        // Ignore far-future stamps (bad rig clock) — they would read as coverage
+        // for minutes that have not happened yet.
+        if (Number.isFinite(t) && t <= now + MAX_FUTURE_SKEW_MS) minutes.add(Math.floor(t / 60_000) * 60_000);
+    }
+    if (!minutes.size) return;
+    // SAVEPOINT: coverage is secondary bookkeeping and must never abort the batch.
+    await client.query('SAVEPOINT coverage');
+    try {
+        await client.query(
+            `INSERT INTO rig_data_coverage (rig_id, minute)
+             SELECT $1, unnest($2::timestamptz[])
+             ON CONFLICT (rig_id, minute) DO NOTHING`,
+            [rigId, [...minutes].map((m) => new Date(m).toISOString())]);
+        await client.query('RELEASE SAVEPOINT coverage');
+    } catch (e) {
+        await client.query('ROLLBACK TO SAVEPOINT coverage');
+        console.warn(`[ingest] ${rigId}: coverage write failed: ${e.message}`);
+    }
+}
+
 function latestSnapshot(channels) {
     let best = null, bestMs = -Infinity;
     for (const snap of channels || []) {
@@ -855,6 +896,7 @@ async function ingestBatch(ctx, batch) {
     // holding its rigs row lock while the probe waited for a second connection.
     // Out here it needs no concurrent client and caches for the process lifetime.
     await telemetryHasSource().catch(() => {});
+    await coverageAvailable();
     let last;
     for (let attempt = 1; attempt <= INGEST_ATTEMPTS; attempt++) {
         last = await ingestBatchOnce(ctx, batch, nowIso);
@@ -1043,6 +1085,7 @@ async function ingestBatchOnce({ rigId, token, schemaVersion, sharedTokens: extr
 
         const source = String(schemaVersion || batch.schemaVersion || '').startsWith('etp') ? 'etp' : 'sync';
         const insertedCounts = await insertTelemetry(client, rigId, channels, nowIso, source);
+        await recordCoverage(client, rigId, channels, nowIso);
         points = insertedCounts.inserted;
         pointsAttempted = insertedCounts.attempted;
 

@@ -11,7 +11,7 @@ import {
 } from 'recharts';
 import ErrorBoundary from './ErrorBoundary';
 import { api } from '../api';
-import { fmtNum } from './common';
+import { fmtNum, UnitFilter } from './common';
 
 // Equipment Performance — one equipment class at a time, compared across every
 // rig. Health index = 40% reliability + 35% condition + 25% maintenance
@@ -241,6 +241,7 @@ export default function EquipmentPerformance() {
     const nav = useNavigate();
     const [hours, setHours] = useState(6);
     const [days, setDays] = useState(30);
+    const [unit, setUnit] = useState('all');
     const [data, setData] = useState(null);
     const [err, setErr] = useState('');
     const [clsId, setClsId] = useState('engine');
@@ -249,10 +250,10 @@ export default function EquipmentPerformance() {
     const [yKey, setYKey] = useState(null);
 
     const load = useCallback(() => {
-        api.equipmentPerformance(hours, days)
+        api.equipmentPerformance(hours, days, unit)
             .then((d) => { setData(d); setErr(''); })
             .catch((e) => { if (e?.response?.status !== 401) setErr(e?.response?.data?.error || 'Failed to load equipment performance'); });
-    }, [hours, days]);
+    }, [hours, days, unit]);
     useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
     const cls = useMemo(() => data?.classes.find((c) => c.id === clsId) || data?.classes[0], [data, clsId]);
@@ -286,6 +287,7 @@ export default function EquipmentPerformance() {
                         The same equipment on every rig, side by side — operating condition, reliability and maintenance.
                     </Typography>
                 </Box>
+                <UnitFilter value={unit} onChange={setUnit} />
                 <Stack direction="row" alignItems="center" spacing={1}>
                     <Typography variant="caption" color="text.secondary">Condition</Typography>
                     <ToggleButtonGroup size="small" exclusive value={hours} onChange={(_e, v) => v && setHours(v)}>

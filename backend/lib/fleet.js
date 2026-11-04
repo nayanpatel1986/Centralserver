@@ -206,12 +206,22 @@ async function getHistory(rigId, metric, minutes = 30) {
 }
 
 // Alarm command centre (proposal Â§6.1): cross-rig active alarms, newest first.
+// Rig ids in an asset unit (a rig's unit is its asset unit, else its field,
+// else 'Unassigned' — the same rule the portal's unit filters use). null = all.
+async function rigIdsForUnit(unit) {
+    if (!unit || unit === 'all') return null;
+    const { rows } = await query(
+        `SELECT rig_id FROM rigs
+         WHERE COALESCE(NULLIF(asset_unit, ''), NULLIF(field, ''), 'Unassigned') = $1`, [String(unit)]);
+    return rows.map((r) => r.rig_id);
+}
+
 async function getAlarms({ priority } = {}) {
     const fleet = await getFleet();
     let list = fleet
         .filter((r) => r.alarm && r.alarm.active > 0 && r.status !== 'offline')
         .map((r) => ({
-            rigId: r.rigId, name: r.name, field: r.field,
+            rigId: r.rigId, name: r.name, field: r.field, assetUnit: r.assetUnit,
             active: r.alarm.active, unack: r.alarm.unack,
             p1: r.alarm.p1, p2: r.alarm.p2, p3: r.alarm.p3,
             highest: r.alarm.highest, lastDataAt: r.lastDataAt, activeActivity: r.activeActivity,
@@ -222,23 +232,6 @@ async function getAlarms({ priority } = {}) {
     // P1 first, then by active count.
     list.sort((a, b) => (b.p1 - a.p1) || (b.active - a.active));
     return list;
-}
-
-// Data quality monitor (proposal Â§6.1): per-rig freshness + completeness.
-async function getDataQuality() {
-    const fleet = await getFleet();
-    return fleet.map((r) => {
-        const missing = r.status === 'pending' ? EXPECTED_METRICS.length
-            : Math.max(0, Math.round(EXPECTED_METRICS.length * (1 - (r.healthScore || 0) / 100) * 0.55 / 0.55));
-        return {
-            rigId: r.rigId, name: r.name, status: r.status,
-            healthScore: r.healthScore, syncLagSec: r.syncLagSec,
-            metricCount: r.metricCount, expectedMetrics: EXPECTED_METRICS.length,
-            lastDataAt: r.lastDataAt,
-            staleFlag: r.syncLagSec != null && r.syncLagSec > FRESH_SEC,
-            offline: r.status === 'offline',
-        };
-    });
 }
 
 // Mark rigs offline once their data ages past the threshold. Returns the rig ids
@@ -261,7 +254,7 @@ async function sweepOffline() {
 
 module.exports = {
     computeHealth, getFleet, getFleetRow, getFleetSummary, getRig, getHistory,
-    getAlarms, getDataQuality, sweepOffline, setOfflineSec, FRESH_SEC,
+    getAlarms, sweepOffline, setOfflineSec, FRESH_SEC, rigIdsForUnit,
     // Expose the current threshold via a getter so callers always read the live value.
     get OFFLINE_SEC() { return OFFLINE_SEC; },
 };

@@ -67,9 +67,10 @@ function clearReconnect() {
 
 function buildEndpoint(c) {
     const raw = String(c?.etp20_endpoint || '').trim();
-    if (!raw) throw new Error('ETP 2.0 endpoint is required');
-    const u = new URL(raw);
-    if (!['ws:', 'wss:'].includes(u.protocol)) throw new Error('ETP 2.0 endpoint must start with ws:// or wss://');
+    if (!raw) throw Object.assign(new Error('ETP 2.0 endpoint is required'), { status: 400 });
+    let u;
+    try { u = new URL(raw); } catch { throw Object.assign(new Error('ETP 2.0 endpoint is not a valid URL'), { status: 400 }); }
+    if (!['ws:', 'wss:'].includes(u.protocol)) throw Object.assign(new Error('ETP 2.0 endpoint must start with ws:// or wss://'), { status: 400 });
     if (c.etp20_auth_type === 'basic' && c.etp20_username) {
         u.username = encodeURIComponent(c.etp20_username);
         u.password = encodeURIComponent(c.etp20_password || '');
@@ -140,9 +141,9 @@ async function configure(nextConfig) {
 
 async function connect(overrideConfig) {
     if (overrideConfig) config = { ...(overrideConfig || {}) };
-    if (!config?.etp20_enabled) throw new Error('ETP 2.0 is disabled');
+    if (!config?.etp20_enabled) throw Object.assign(new Error('ETP 2.0 is disabled'), { status: 409 });
     const endpoint = buildEndpoint(config);
-    if (typeof WebSocket === 'undefined') throw new Error('Node WebSocket runtime is unavailable');
+    if (typeof WebSocket === 'undefined') throw Object.assign(new Error('Node WebSocket runtime is unavailable'), { status: 501 });
 
     manualDisconnect = false;
     clearReconnect();
@@ -212,7 +213,7 @@ async function test(testConfig) {
     const previousWs = ws;
     const testCfg = { ...(previous || {}), ...(testConfig || {}), etp20_enabled: true };
     const endpoint = buildEndpoint(testCfg);
-    if (typeof WebSocket === 'undefined') throw new Error('Node WebSocket runtime is unavailable');
+    if (typeof WebSocket === 'undefined') throw Object.assign(new Error('Node WebSocket runtime is unavailable'), { status: 501 });
     return new Promise((resolve, reject) => {
         let sock;
         const timeout = setTimeout(() => {

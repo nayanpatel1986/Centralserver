@@ -31,6 +31,7 @@ const NAV = [
     { to: '/equipment', label: 'Equipment Performance', icon: <PrecisionManufacturing /> },
     { to: '/data-quality', label: 'Data Quality', icon: <FactCheck /> },
     { to: '/reports', label: 'Reports', icon: <Assessment /> },
+    { to: '/governance', label: 'Governance & Rollout', icon: <AccountTree /> },
     { to: '/registry', label: 'Config Registry', icon: <Storage /> },
     { to: '/users', label: 'User Access', icon: <ManageAccounts />, role: 'admin' },
     { to: '/settings', label: 'Settings', icon: <Tune />, role: 'admin' },

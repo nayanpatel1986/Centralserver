@@ -1,6 +1,26 @@
-import React from 'react';
-import { Chip, Paper, Box, Typography } from '@mui/material';
+import React, { useMemo } from 'react';
+import { Chip, Paper, Box, Typography, FormControl, InputLabel, Select, MenuItem } from '@mui/material';
 import { STATUS_COLOR } from '../theme';
+import { useFleet } from '../context/FleetContext';
+
+// A rig's asset unit for filtering: its asset unit, else its field, else
+// 'Unassigned' (the backend's rigIdsForUnit uses the same rule).
+export const unitOf = (r) => r?.assetUnit || r?.asset_unit || r?.field || 'Unassigned';
+
+// Asset-unit filter shared by the fleet pages; the unit list comes from the fleet.
+export function UnitFilter({ value, onChange, sx }) {
+    const { fleet } = useFleet();
+    const units = useMemo(() => [...new Set((fleet || []).map(unitOf))].sort((a, b) => a.localeCompare(b)), [fleet]);
+    return (
+        <FormControl size="small" sx={{ minWidth: 170, ...sx }}>
+            <InputLabel id="unit-filter-label">Asset unit</InputLabel>
+            <Select labelId="unit-filter-label" label="Asset unit" value={value} onChange={(e) => onChange(e.target.value)}>
+                <MenuItem value="all">All units</MenuItem>
+                {units.map((u) => <MenuItem key={u} value={u}>{u}</MenuItem>)}
+            </Select>
+        </FormControl>
+    );
+}
 
 export const fmtNum = (v, d = 1) => (v == null || Number.isNaN(Number(v)) ? '—' : Number(v).toLocaleString(undefined, { maximumFractionDigits: d }));
 

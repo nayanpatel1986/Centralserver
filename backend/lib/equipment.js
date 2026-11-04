@@ -93,14 +93,14 @@ function median(xs) {
 // Is this deviation in the harmful direction for the parameter?
 const harmful = (better, dev) => (better === 'none' ? false : better === 'mid' ? dev !== 0 : better === 'low' ? dev > 0 : dev < 0);
 
-async function getEquipmentPerformance({ hours = 24, days = 30 } = {}) {
+async function getEquipmentPerformance({ hours = 24, days = 30, unit } = {}) {
     const h = clamp(Number(hours) || 24, 1, 24 * 14);
     const d = clamp(Number(days) || 30, 1, 365);
     const winH = `${h} hours`;
     const winD = `${d} days`;
     const bucket = `${Math.max(5, Math.round((h * 60) / 24))} minutes`;
 
-    const [rigs, telQ, trendQ, dtQ, cmmsQ] = await Promise.all([
+    const [allRigs, telQ, trendQ, dtQ, cmmsQ] = await Promise.all([
         fleet.getFleet(),
         query(
             `SELECT rig_id, metric, avg(value) AS avg,
@@ -125,6 +125,11 @@ async function getEquipmentPerformance({ hours = 24, days = 30 } = {}) {
         query('SELECT rig_id, snapshot FROM rig_cmms'),
     ]);
 
+    // Unit filter: compare only that unit's rigs (stats, findings, causes too).
+    const unitOf = (r) => r.assetUnit || r.field || 'Unassigned';
+    const rigs = unit && unit !== 'all' ? allRigs.filter((r) => unitOf(r) === unit) : allRigs;
+    const inScope = new Set(rigs.map((r) => r.rigId));
+
     // rig -> metric -> { avg, p95, n }
     const tel = new Map();
     for (const r of telQ.rows) {
@@ -144,7 +149,7 @@ async function getEquipmentPerformance({ hours = 24, days = 30 } = {}) {
         const ids = new Set(cls.assetIds);
         const nameLc = cls.name.toLowerCase();
         const isMine = (row) => ids.has(row.asset_id) || row.asset === nameLc;
-        const dtRows = dtQ.rows.filter(isMine);
+        const dtRows = dtQ.rows.filter((r) => inScope.has(r.rig_id) && isMine(r));
 
         const units = [];
         for (const rig of rigs) {

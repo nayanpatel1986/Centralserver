@@ -23,6 +23,9 @@
 //            --rigs 8                         (1-20; rigs 11-20 add a second rig per asset)
 //            --interval 5                     (seconds between live batches)
 //            --once                           (backfill + one live batch, then exit)
+//            --no-history                     (skip the 30 min trend backfill on start; use when the
+//                                              rigs already have history, so the Data Quality
+//                                              Monitor does not count it as a backfill)
 // =====================================================================
 const crypto = require('crypto');
 const path = require('path');
@@ -40,6 +43,7 @@ function parseArgs(argv) {
         else if (a === '--rigs') o.rigs = Math.max(1, Math.min(20, Number(argv[++i]) || 8));
         else if (a === '--interval') o.interval = Math.max(2, Number(argv[++i]) || 5);
         else if (a === '--once') o.once = true;
+        else if (a === '--no-history') o.noHistory = true;
         else if (a === '--help' || a === '-h') { console.log(require('fs').readFileSync(__filename, 'utf8').split('\n').slice(2, 27).join('\n')); process.exit(0); }
     }
     return o;
@@ -361,10 +365,29 @@ async function backfill(o, rig) {
     rig.downtime = downtime;
     rig.logbook = buildLogbook(rig, now);
     events.push({ type: 'cmms.snapshot', ts: iso(now), payload: buildCmms(rig, now, downtime, rig.logbook) });
-    // 30 minutes of trend history at 15 s.
+    // 30 minutes of trend history at 15 s (skipped with --no-history).
     const channels = [];
-    for (let t = now - 30 * 60_000; t <= now; t += 15_000) channels.push({ ts: iso(t), values: telemetry(rig, t) });
+    const from = o.noHistory ? now : now - 30 * 60_000;
+    for (let t = from; t <= now; t += 15_000) channels.push({ ts: iso(t), values: telemetry(rig, t) });
     return send(o, rig, channels, events);
+}
+
+// Link faults, so the Data Quality Monitor has outages and backfill to show.
+// every/down/offset in minutes from the script start. replay: the edge keeps a
+// store-and-forward buffer and sends it on reconnect (backfill); without it the
+// data for the outage is lost. replayChunk: snapshots per batch while draining
+// (small = a slow, visible "backfilling" phase).
+const LINK_FAULTS = {
+    3: { every: 15, down: 4, offset: 3, replay: true },
+    7: { every: 60, down: 12, offset: 6, replay: true, replayChunk: 20 },
+    11: { every: 30, down: 5, offset: 9, replay: false },
+    14: { every: 25, down: 6, offset: 12, replay: true },
+};
+function linkDown(rig, now) {
+    const f = LINK_FAULTS[rig.index];
+    if (!f) return false;
+    const m = (now - rig.started) / 60_000 - f.offset;
+    return m >= 0 && (m % f.every) < f.down;
 }
 
 async function tick(o, rig, n) {
@@ -392,7 +415,36 @@ async function tick(o, rig, n) {
     if (n % Math.max(1, Math.round(60 / o.interval)) === 0) {
         events.push({ type: 'cmms.snapshot', ts: iso(now), payload: buildCmms(rig, now, rig.downtime, rig.logbook) });
     }
-    return send(o, rig, [{ ts: iso(now), values: telemetry(rig, now) }], events);
+    const channels = [{ ts: iso(now), values: telemetry(rig, now) }];
+    const fault = LINK_FAULTS[rig.index] || {};
+    rig.buffer = rig.buffer || { channels: [], events: [] };
+    if (linkDown(rig, now)) {
+        // Simulated link fault: buffer (store-and-forward) or lose the data.
+        if (fault.replay) { rig.buffer.channels.push(...channels); rig.buffer.events.push(...events); }
+        trimBuffer(rig);
+        return { skipped: true };
+    }
+    // Store-and-forward like the real edge: queue the live sample behind any
+    // backlog, send oldest-first (a chunk per batch), and put it back on failure.
+    rig.buffer.channels.push(...channels);
+    rig.buffer.events.push(...events);
+    const sendCh = rig.buffer.channels.splice(0, fault.replayChunk || 3600);
+    const sendEv = rig.buffer.channels.length ? [] : rig.buffer.events.splice(0);
+    try {
+        return await send(o, rig, sendCh, sendEv);
+    } catch (e) {
+        rig.buffer.channels.unshift(...sendCh);
+        rig.buffer.events.unshift(...sendEv);
+        trimBuffer(rig);
+        throw e;
+    }
+}
+
+// Bound the buffer (~2 h at 5 s), dropping the oldest like a full edge buffer.
+function trimBuffer(rig) {
+    const max = 1440;
+    if (rig.buffer.channels.length > max) rig.buffer.channels.splice(0, rig.buffer.channels.length - max);
+    if (rig.buffer.events.length > max) rig.buffer.events.splice(0, rig.buffer.events.length - max);
 }
 
 async function main() {

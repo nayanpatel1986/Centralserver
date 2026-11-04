@@ -8,7 +8,7 @@ import {
     ResponsiveContainer, ComposedChart, Bar, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
 } from 'recharts';
 import { api } from '../api';
-import { KpiCard, fmtNum, fmtAgo } from './common';
+import { KpiCard, fmtNum, fmtAgo, UnitFilter } from './common';
 import ErrorBoundary from './ErrorBoundary';
 
 // Fleet workover performance — industry-standard job KPIs (IADC daily-report
@@ -79,23 +79,24 @@ export default function WorkoverPerformance() {
     const nav = useNavigate();
     const [hours, setHours] = useState(24);
     const [days, setDays] = useState(30);
+    const [unit, setUnit] = useState('all');
     const [data, setData] = useState({ connections: [], activity: [] });
     const [kpis, setKpis] = useState(null);
     const [err, setErr] = useState('');
     const [loading, setLoading] = useState(true);
 
     const load = useCallback(() => {
-        api.workover(hours)
+        api.workover(hours, unit)
             .then((d) => { setData(d); setErr(''); })
             .catch((e) => { if (e?.response?.status !== 401) setErr(e?.response?.data?.error || 'Failed to load workover data'); })
             .finally(() => setLoading(false));
-    }, [hours]);
+    }, [hours, unit]);
 
     const loadKpis = useCallback(() => {
-        api.workoverKpis(days)
+        api.workoverKpis(days, unit)
             .then((k) => { setKpis(k); setErr(''); })
             .catch((e) => { if (e?.response?.status !== 401) setErr(e?.response?.data?.error || 'Failed to load workover KPIs'); });
-    }, [days]);
+    }, [days, unit]);
 
     useEffect(() => { setLoading(true); load(); const t = setInterval(load, 8000); return () => clearInterval(t); }, [load]);
     useEffect(() => { loadKpis(); const t = setInterval(loadKpis, 30000); return () => clearInterval(t); }, [loadKpis]);
@@ -109,6 +110,7 @@ export default function WorkoverPerformance() {
         <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto' }}>
             <Stack direction="row" alignItems="center" spacing={2} mb={2} flexWrap="wrap" useFlexGap>
                 <Typography variant="h5" fontWeight={800} sx={{ flexGrow: 1 }}>Workover Performance</Typography>
+                <UnitFilter value={unit} onChange={setUnit} />
                 <Typography variant="caption" color="text.secondary">KPI window</Typography>
                 <ToggleButtonGroup size="small" exclusive value={days} onChange={(_, v) => v && setDays(v)}>
                     <ToggleButton value={7}>7d</ToggleButton>

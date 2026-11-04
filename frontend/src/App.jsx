@@ -14,6 +14,7 @@ import Reports from './components/Reports';
 import ConfigRegistry from './components/ConfigRegistry';
 import Maintenance from './components/Maintenance';
 import EquipmentPerformance from './components/EquipmentPerformance';
+import Governance from './components/Governance';
 import Users from './components/Users';
 import Settings from './components/Settings';
 
@@ -51,6 +52,7 @@ export default function App() {
                 <Route path="maintenance" element={<RequireUnscoped><Maintenance /></RequireUnscoped>} />
                 <Route path="equipment" element={<RequireUnscoped><EquipmentPerformance /></RequireUnscoped>} />
                 <Route path="reports" element={<RequireUnscoped><Reports /></RequireUnscoped>} />
+                <Route path="governance" element={<RequireUnscoped><Governance /></RequireUnscoped>} />
                 <Route path="registry" element={<RequireUnscoped><ConfigRegistry /></RequireUnscoped>} />
                 <Route path="users" element={<RequireRole role="admin"><Users /></RequireRole>} />
                 <Route path="settings" element={<RequireRole role="admin"><Settings /></RequireRole>} />
