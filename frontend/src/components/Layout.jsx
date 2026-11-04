@@ -6,7 +6,7 @@ import {
 } from '@mui/material';
 import {
     SpaceDashboard, NotificationsActive, FactCheck, Speed, AccountTree,
-    Assessment, Storage, Logout, Circle, Warning, Engineering, ManageAccounts,
+    Assessment, Storage, Logout, Circle, Warning, Engineering, ManageAccounts, PrecisionManufacturing,
     MenuOpen, Menu as MenuIcon, ShieldOutlined, Tune, People, MonitorHeart,
 } from '@mui/icons-material';
 import { useAuth } from '../context/AuthContext';
@@ -28,6 +28,7 @@ const NAV = [
     { to: '/wells', label: 'Activity Status', icon: <MonitorHeart /> },
     { to: '/workover', label: 'Workover Performance', icon: <Speed /> },
     { to: '/maintenance', label: 'Maintenance & Reliability', icon: <Engineering /> },
+    { to: '/equipment', label: 'Equipment Performance', icon: <PrecisionManufacturing /> },
     { to: '/data-quality', label: 'Data Quality', icon: <FactCheck /> },
     { to: '/reports', label: 'Reports', icon: <Assessment /> },
     { to: '/registry', label: 'Config Registry', icon: <Storage /> },

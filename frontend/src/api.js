@@ -74,6 +74,7 @@ export const api = {
     maintenanceSummary: () => axios.get('/api/maintenance/summary').then((r) => r.data),
     maintenanceKpis: (days) => axios.get('/api/maintenance/kpis', { params: days ? { days } : {} }).then((r) => r.data),
     maintenanceLog: (params) => axios.get('/api/maintenance/log', { params }).then((r) => r.data),
+    equipmentPerformance: (hours, days) => axios.get('/api/equipment/performance', { params: { hours, days } }).then((r) => r.data),
     maintenanceFleetDaily: () => axios.get('/api/maintenance/fleet-daily').then((r) => r.data),
     updateMaintenance: (id, patch) => axios.patch(`/api/maintenance/${id}`, patch).then((r) => r.data),
 

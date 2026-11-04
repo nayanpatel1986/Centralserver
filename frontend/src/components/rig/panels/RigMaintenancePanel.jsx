@@ -189,10 +189,10 @@ export default function RigMaintenancePanel({ rigId }) {
                             <TableBody>
                                 {pm.map((t, i) => (
                                     <TableRow key={t.id || i} hover>
-                                        <TableCell>{t.assetName || t.assetId}</TableCell>
+                                        <TableCell>{t.assetName || t.asset || t.assetId}</TableCell>
                                         <TableCell>{t.task || t.name || '—'}</TableCell>
                                         <TableCell align="right">{fmtNum(t.intervalH, 0)}</TableCell>
-                                        <TableCell align="right" sx={{ color: pmColor(t.status), fontWeight: 700 }}>{fmtNum(t.dueInHours, 0)}</TableCell>
+                                        <TableCell align="right" sx={{ color: pmColor(t.status), fontWeight: 700 }}>{fmtNum(t.dueInHours ?? t.nextDueInHours, 0)}</TableCell>
                                         <TableCell><Chip size="small" label={PM_LABEL[t.status] || t.status || '—'} sx={{ height: 20, bgcolor: `${pmColor(t.status)}22`, color: pmColor(t.status), fontWeight: 700 }} /></TableCell>
                                     </TableRow>
                                 ))}
@@ -237,12 +237,12 @@ export default function RigMaintenancePanel({ rigId }) {
                             <TableBody>
                                 {logbook.map((l, i) => (
                                     <TableRow key={l.id || i} hover>
-                                        <TableCell>{fmtTs(l.ts || l.date)}</TableCell>
+                                        <TableCell>{fmtTs(l.ts || l.date || l.at)}</TableCell>
                                         <TableCell>{l.shift || '—'}</TableCell>
                                         <TableCell>{l.category || l.logType || '—'}</TableCell>
-                                        <TableCell>{l.assetId || '—'}</TableCell>
+                                        <TableCell>{l.asset || l.assetId || '—'}</TableCell>
                                         <TableCell sx={{ fontFamily: 'monospace' }}>{l.notificationNo || l.workOrderNo || '—'}</TableCell>
-                                        <TableCell>{l.entry || '—'}</TableCell>
+                                        <TableCell>{l.entry || l.text || '—'}</TableCell>
                                         <TableCell>{l.by || '—'}</TableCell>
                                     </TableRow>
                                 ))}
@@ -265,7 +265,7 @@ export default function RigMaintenancePanel({ rigId }) {
                                         <TableCell>{fmtTs(d.start)}</TableCell>
                                         <TableCell>{d.end ? fmtTs(d.end) : <Chip size="small" label="OPEN" sx={{ height: 20, bgcolor: '#f9731622', color: '#f97316', fontWeight: 700 }} />}</TableCell>
                                         <TableCell align="right">{d.end ? fmtMin(d.durationMin) : '—'}</TableCell>
-                                        <TableCell>{d.assetId || '—'}</TableCell>
+                                        <TableCell>{d.asset || d.assetId || '—'}</TableCell>
                                         <TableCell>{d.reasonCode || '—'}</TableCell>
                                         <TableCell sx={{ fontFamily: 'monospace' }}>{d.notificationNo || '—'}</TableCell>
                                         <TableCell>{d.notes || '—'}</TableCell>

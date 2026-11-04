@@ -659,6 +659,7 @@ async function persistCmmsHistory(client, rigId, snap) {
                 `INSERT INTO rig_downtime (rig_id, record_id, asset_id, asset, reason_code, start_ts, end_ts, duration_min, notes, updated_at)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
                  ON CONFLICT (rig_id, record_id) DO UPDATE SET
+                   start_ts = COALESCE(EXCLUDED.start_ts, rig_downtime.start_ts),
                    end_ts = EXCLUDED.end_ts, duration_min = EXCLUDED.duration_min,
                    reason_code = COALESCE(EXCLUDED.reason_code, rig_downtime.reason_code),
                    notes = COALESCE(EXCLUDED.notes, rig_downtime.notes), updated_at = now()`,
@@ -667,17 +668,26 @@ async function persistCmmsHistory(client, rigId, snap) {
                  Number.isFinite(Number(d.durationMin)) ? Number(d.durationMin) : null, d.notes || null]);
         }
         for (const l of Array.isArray(snap.logbook) ? snap.logbook.slice(0, 300) : []) {
-            const id = String(l.id || `${l.at || ''}-${(l.text || '').slice(0, 40)}`).slice(0, 160);
+            // Edge builds name these fields differently (text|entry, at|ts|date).
+            const text = l.text ?? l.entry ?? '';
+            const at = l.at || l.ts || l.date;
+            const id = String(l.id || `${at || ''}-${String(text).slice(0, 40)}`).slice(0, 160);
             if (!id) continue;
             await client.query(
                 `INSERT INTO rig_maint_log (rig_id, entry_id, log_type, category, asset_id, asset, text, by_who, shift, notification_no, at_ts, updated_at)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
                  ON CONFLICT (rig_id, entry_id) DO UPDATE SET
                    text = EXCLUDED.text, notification_no = COALESCE(EXCLUDED.notification_no, rig_maint_log.notification_no),
+                   log_type = COALESCE(EXCLUDED.log_type, rig_maint_log.log_type),
+                   category = COALESCE(EXCLUDED.category, rig_maint_log.category),
+                   asset_id = EXCLUDED.asset_id, asset = EXCLUDED.asset,
+                   by_who = COALESCE(EXCLUDED.by_who, rig_maint_log.by_who),
+                   shift = COALESCE(EXCLUDED.shift, rig_maint_log.shift),
+                   at_ts = COALESCE(EXCLUDED.at_ts, rig_maint_log.at_ts),
                    updated_at = now()`,
                 [rigId, id, l.logType || null, l.category || null, l.assetId || null, l.asset || null,
-                 String(l.text || '').slice(0, 500), l.by || null, l.shift || null,
-                 l.notificationNo || l.woNo || null, coerceTsIso(l.at || l.ts)]);
+                 String(text || '').slice(0, 500), l.by || null, l.shift || null,
+                 l.notificationNo || l.workOrderNo || l.woNo || null, coerceTsIso(at)]);
         }
     } catch (e) {
         // Rethrow: the caller's SAVEPOINT contains it. Swallowing here would leave

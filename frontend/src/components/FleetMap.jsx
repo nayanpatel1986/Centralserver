@@ -1,21 +1,47 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Box, Paper, Stack, Typography } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
-import { MapContainer, TileLayer, CircleMarker, Tooltip } from 'react-leaflet';
+import { MapContainer, TileLayer, CircleMarker, Tooltip, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { STATUS_COLOR } from '../theme';
 
 // Interactive pan/zoom fleet map (Leaflet) over India — pan-ONGC. Each rig is a
 // status-coloured marker; clicking it opens the rig drill-down.
 //
-// Tiles default to CARTO dark (matches the ops theme). DATA RESIDENCY: a production
-// ONGC deployment (zero internet egress) should point VITE_MAP_TILE_URL at an
-// INTERNAL/offline tile server; the map, markers and pan/zoom work regardless of
-// whether the basemap tiles load.
-const TILE_URL = import.meta.env.VITE_MAP_TILE_URL
-    || 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+// Tiles come from the CRMF backend (/api/tiles), which proxies a key-free dark
+// basemap and caches every tile on disk, so the map keeps working offline and
+// under the portal CSP. DATA RESIDENCY: point the backend's MAP_TILE_UPSTREAM_*
+// at an internal tile server (or VITE_MAP_TILE_URL at one directly); the map,
+// markers and pan/zoom work regardless of whether the basemap tiles load.
+const TILE_URL = import.meta.env.VITE_MAP_TILE_URL || '/api/tiles/base/{z}/{x}/{y}';
+const LABEL_URL = import.meta.env.VITE_MAP_TILE_URL ? null : '/api/tiles/labels/{z}/{x}/{y}';
 const TILE_ATTR = import.meta.env.VITE_MAP_TILE_ATTR
-    || '&copy; OpenStreetMap contributors &copy; CARTO';
+    || 'Basemap &copy; Esri, HERE, Garmin, &copy; OpenStreetMap contributors';
+
+// Zoom to the rigs on first load (and whenever the set of located rigs
+// changes), not on every live update, so the user's own pan/zoom sticks.
+function FitToRigs({ pts }) {
+    const map = useMap();
+    const lastKey = useRef('');
+    const key = pts.map((r) => r.rigId).sort().join('|');
+    useEffect(() => {
+        if (!pts.length || key === lastKey.current) return;
+        lastKey.current = key;
+        const bounds = pts.map((r) => [Number(r.latitude), Number(r.longitude)]);
+        map.invalidateSize();
+        map.fitBounds(bounds, { padding: [28, 28], maxZoom: 7 });
+    }, [key, map, pts]);
+    // The pane is flex-sized and settles after Leaflet initialises; without
+    // invalidateSize Leaflet keeps its first size and only tiles part of the map.
+    useEffect(() => {
+        const el = map.getContainer();
+        if (typeof ResizeObserver === 'undefined' || !el) return undefined;
+        const ro = new ResizeObserver(() => map.invalidateSize());
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, [map]);
+    return null;
+}
 
 export default function FleetMap({ rigs = [] }) {
     const nav = useNavigate();
@@ -39,7 +65,9 @@ export default function FleetMap({ rigs = [] }) {
                 worldCopyJump
                 style={{ height: '100%', width: '100%', background: '#0b1220' }}
             >
-                <TileLayer url={TILE_URL} attribution={TILE_ATTR} subdomains="abcd" />
+                <TileLayer url={TILE_URL} attribution={TILE_ATTR} maxZoom={16} />
+                {LABEL_URL && <TileLayer url={LABEL_URL} maxZoom={16} />}
+                <FitToRigs pts={pts} />
                 {pts.map((r) => {
                     const color = STATUS_COLOR[r.status] || STATUS_COLOR.pending;
                     return (
@@ -54,6 +82,7 @@ export default function FleetMap({ rigs = [] }) {
                                 <strong>{r.name}</strong> · {r.assetUnit || r.field || '—'}<br />
                                 {String(r.status || '').toUpperCase()}
                                 {r.alarm?.p1 ? ' · P1' : ''}{r.activeActivity ? ` · ${r.activeActivity}` : ''}
+                                {(r.currentWellName || r.activeJob) ? <><br />Well: {r.currentWellName || r.activeJob}</> : null}
                             </Tooltip>
                         </CircleMarker>
                     );

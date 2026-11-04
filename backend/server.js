@@ -48,6 +48,8 @@ const presence = require('./lib/presence');
 const messages = require('./lib/messages');
 const cmmsFallback = require('./lib/cmmsFallback');
 const ahwr150Hpu = require('./lib/ahwr150Hpu');
+const tiles = require('./lib/tiles');
+const equipment = require('./lib/equipment');
 
 const PORT = Number(process.env.PORT || 6000);
 const METRICS_ENABLED = process.env.METRICS_ENABLED !== 'false'; // default ON
@@ -437,6 +439,21 @@ function buildApiRouter() {
         next();
     };
 
+    // ----- Fleet map basemap tiles (same-origin, disk-cached; see lib/tiles.js) -----
+    r.get('/tiles/:layer/:z/:x/:y', async (req, res) => {
+        try {
+            const t = await tiles.getTile(req.params.layer, req.params.z, req.params.x, String(req.params.y).replace(/\.(png|jpg)$/, ''));
+            if (t && t.invalid) return res.status(400).end();
+            if (!t) return res.status(204).end();
+            res.setHeader('Content-Type', t.type);
+            res.setHeader('Cache-Control', 'private, max-age=604800');
+            res.end(t.buf);
+        } catch (e) {
+            console.warn('[tiles] error:', e.message);
+            res.status(204).end();
+        }
+    });
+
     // ----- Fleet -----
     r.get('/fleet', wrap(() => fleet.getFleet()));
     r.get('/fleet/summary', wrap(() => fleet.getFleetSummary()));
@@ -765,6 +782,9 @@ function buildApiRouter() {
     r.get('/maintenance', wrap((req) =>
         maint.listMaintenance({ rigId: req.query.rigId, status: req.query.status })));
     r.get('/maintenance/summary', wrap(() => maint.maintenanceSummary()));
+    // Equipment performance: each equipment class compared across the fleet
+    // (condition from telemetry, reliability from downtime, PM from CMMS).
+    r.get('/equipment/performance', wrap((req) => equipment.getEquipmentPerformance({ hours: req.query.hours, days: req.query.days })));
     // Fleet reliability KPIs (availability, MTBF/MTTR, NPT, Pareto, monthly
     // trend + CMMS posture). Read-only.
     r.get('/maintenance/kpis', wrap((req) => gov.getMaintenanceKpis({ days: req.query.days, tz: req.query.tz })));

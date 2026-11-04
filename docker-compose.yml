@@ -111,10 +111,16 @@ services:
       - LDAP_STARTTLS=${LDAP_STARTTLS:-false}
       # Default TRUE: enforce CA validation. Set false ONLY for a self-signed lab DC.
       - LDAP_TLS_REJECT_UNAUTHORIZED=${LDAP_TLS_REJECT_UNAUTHORIZED:-true}
+      # --- Fleet-map basemap tiles (served via /api/tiles, cached in crmf_tiles).
+      # Point at an internal tile server for zero-egress sites, or "off" for cache-only.
+      - TILE_CACHE_DIR=/tiles
+      - MAP_TILE_UPSTREAM_BASE=${MAP_TILE_UPSTREAM_BASE:-}
+      - MAP_TILE_UPSTREAM_LABELS=${MAP_TILE_UPSTREAM_LABELS:-}
     volumes:
       # Where backend/scripts/provision-rigs.js writes issued per-rig credentials
       # (--json / --out).
       - crmf_provisioning:/provisioning
+      - crmf_tiles:/tiles
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -151,6 +157,7 @@ services:
 volumes:
   crmf_pgdata:
   crmf_provisioning:
+  crmf_tiles:
 
 
 

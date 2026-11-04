@@ -26,3 +26,4 @@ frontend/dist-backup-*/
 *.zip.sha256.txt
 *.exe
 *.lnk
+backend/data/

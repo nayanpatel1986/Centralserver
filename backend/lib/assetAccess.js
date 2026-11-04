@@ -25,6 +25,8 @@ async function middleware(req, res, next) {
     const path = req.path;
     const rigMatch = /^\/rigs\/([^/]+)(?:\/(?:history|live|history-multi|history-bounds|alarms|hpu-analytics|activity|cmms|messages))?$/.exec(path);
     const wellMatch = /^\/wells\/([^/]+)(?:\/(?:runs|runlog))?$/.exec(path);
+    // Basemap tiles carry no fleet data; scoped viewers need them for the map.
+    if (path.startsWith('/tiles/')) return next();
     const allowed = ['/fleet', '/fleet/summary', '/alarms', '/data-quality', '/wells', '/messages', '/config/rigs', '/presence'].includes(path);
     if (!rigMatch && !wellMatch && !allowed) return res.status(403).json({ error: 'not available for asset-scoped viewers' });
     try {

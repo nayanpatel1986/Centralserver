@@ -112,17 +112,26 @@ async function getMaintenanceKpis({ days = 30, tz = 'Asia/Kolkata' } = {}) {
     const win = `${d} days`;
     const windowHours = d * 24;
 
-    // Per-rig reliability from the accumulated downtime history.
+    // Per-rig reliability from the accumulated downtime history. NPT is the part
+    // of each record that overlaps the window, so a breakdown that is still OPEN
+    // (no end_ts yet) or began before the window still counts against
+    // availability; it used to be ignored, showing a down rig as 100% available.
+    // A closed record's length is the edge's own duration_min when it has one.
+    // MTTR stays closed-records-only (an open repair has no repair time yet).
     const dtQ = await query(
         `SELECT dt.rig_id,
                 r.name,
                 count(*) FILTER (WHERE dt.end_ts IS NOT NULL)                       AS breakdowns,
                 count(*) FILTER (WHERE dt.end_ts IS NULL)                           AS open_records,
-                COALESCE(sum(dt.duration_min) FILTER (WHERE dt.end_ts IS NOT NULL), 0) / 60.0 AS npt_hours,
+                COALESCE(sum(GREATEST(0, EXTRACT(EPOCH FROM (
+                    LEAST(CASE WHEN dt.end_ts IS NULL THEN now()
+                               ELSE COALESCE(dt.start_ts + dt.duration_min * interval '1 minute', dt.end_ts) END, now())
+                    - GREATEST(dt.start_ts, now() - ($1)::interval))))), 0) / 3600.0 AS npt_hours,
                 avg(dt.duration_min) FILTER (WHERE dt.end_ts IS NOT NULL) / 60.0    AS mttr_hours
          FROM rig_downtime dt
          LEFT JOIN rigs r ON r.rig_id = dt.rig_id
-         WHERE dt.rig_id IS NOT NULL AND dt.start_ts > now() - ($1)::interval
+         WHERE dt.rig_id IS NOT NULL AND dt.start_ts IS NOT NULL
+           AND COALESCE(dt.end_ts, now()) > now() - ($1)::interval
          GROUP BY dt.rig_id, r.name`,
         [win]);
 
@@ -171,18 +180,24 @@ async function getMaintenanceKpis({ days = 30, tz = 'Asia/Kolkata' } = {}) {
     // PM posture per EQUIPMENT class, cumulated across every rig's latest
     // CMMS snapshot (status values per the edge shape: overdue | due-soon | ok).
     const pmEqQ = await query(
-        `SELECT COALESCE(NULLIF(trim(p->>'asset'), ''), p->>'assetId', 'Unspecified') AS equipment,
+        `SELECT COALESCE(NULLIF(trim(COALESCE(p->>'asset', p->>'assetName')), ''), p->>'assetId', 'Unspecified') AS equipment,
                 count(*)                                              AS units,
                 count(*) FILTER (WHERE p->>'status' = 'overdue')      AS overdue,
                 count(*) FILTER (WHERE p->>'status' = 'due-soon')     AS due_soon,
                 count(*) FILTER (WHERE p->>'status' = 'ok')           AS ok,
-                avg((p->>'nextDueInHours')::double precision)
-                    FILTER (WHERE (p->>'nextDueInHours') ~ '^-?[0-9]+(\\.[0-9]+)?$') AS avg_next_due_h
+                avg(COALESCE(p->>'nextDueInHours', p->>'dueInHours')::double precision)
+                    FILTER (WHERE COALESCE(p->>'nextDueInHours', p->>'dueInHours') ~ '^-?[0-9]+(\\.[0-9]+)?$') AS avg_next_due_h
          FROM rig_cmms, jsonb_array_elements(COALESCE(snapshot->'pm', '[]'::jsonb)) AS p
          GROUP BY 1
          ORDER BY overdue DESC, due_soon DESC, equipment`);
 
-    const rigCountQ = await query('SELECT count(*) AS n FROM rigs');
+    // Fleet availability/MTBF are averaged over rigs that have ever reported
+    // (telemetry or a CMMS snapshot). Counting registered-but-silent rigs as
+    // 100% available inflated the fleet figure.
+    const rigCountQ = await query(
+        `SELECT count(*) AS n FROM rigs r
+         WHERE r.last_data_at IS NOT NULL
+            OR EXISTS (SELECT 1 FROM rig_cmms c WHERE c.rig_id = r.rig_id)`);
     const totalRigs = Number(rigCountQ.rows[0].n) || 0;
     const num = (v) => (v == null ? null : Number(v));
 

@@ -8,21 +8,36 @@ import {
 import { ChatBubbleOutline, OpenInNew, Search } from '@mui/icons-material';
 import { useFleet } from '../context/FleetContext';
 import { useAuth } from '../context/AuthContext';
-import { PriorityChip } from './common';
 import { STATUS_COLOR } from '../theme';
 import FleetMap from './FleetMap';
-import { api } from '../api';
+import { api, phaseColor } from '../api';
 import { socket } from '../socket';
 
-const healthColor = (v) => (v >= 80 ? STATUS_COLOR.online : v >= 50 ? STATUS_COLOR.degraded : STATUS_COLOR.offline);
+// "21.63°N 73.00°E" — compact coordinates for the tile's hover text.
+const fmtCoord = (lat, lon) => {
+    const la = Number(lat), lo = Number(lon);
+    if (lat == null || lon == null || !Number.isFinite(la) || !Number.isFinite(lo)) return '';
+    return `${Math.abs(la).toFixed(2)}°${la >= 0 ? 'N' : 'S'} ${Math.abs(lo).toFixed(2)}°${lo >= 0 ? 'E' : 'W'}`;
+};
+// Activity codes arrive as RIH / MAKE_UP / well.started; show them readably.
+const fmtOperation = (a) => (a ? String(a).replace(/^well\./, 'well ').replace(/_/g, ' ') : '');
 
-// Compact clickable rig tile, coloured by status. One line carries name · activity ·
-// location; a short health bar + alarm sit below. Clicking zooms briefly then opens the rig.
+// Minimal rig tile, three lines: rig ID (+ alarm priority only when one is
+// active), the current well, and the operation in progress with the rig's
+// data-quality score. Status is shown once, by the coloured left edge; the rig
+// name and location are in the hover text. Offline / pending rigs are dimmed.
 function RigTile({ rig, onOpen }) {
     const [zoom, setZoom] = useState(false);
     const color = STATUS_COLOR[rig.status] || STATUS_COLOR.pending;
-    const location = rig.assetUnit || rig.field || '—';
-    const hv = Math.max(0, Math.min(100, rig.healthScore || 0));
+    const live = rig.status !== 'offline' && rig.status !== 'pending';
+    const well = rig.currentWellName || rig.activeJob || '';
+    const operation = fmtOperation(rig.activeActivity);
+    const opColor = live && operation ? phaseColor(rig.activeActivity) : 'text.disabled';
+    const place = [rig.field, rig.assetUnit, fmtCoord(rig.latitude, rig.longitude)].filter(Boolean).join(' · ');
+    const dq = live ? Math.round(rig.healthScore || 0) : null;
+    const dqColor = dq == null ? 'text.disabled' : dq >= 80 ? 'text.secondary' : dq >= 50 ? '#f59e0b' : '#ef4444';
+    const tip = [`${rig.rigId} — ${rig.name} (${rig.status})`, `Well: ${well || '—'}`, `Operation: ${operation || '—'}`,
+        `Location: ${place || '—'}`, `Data quality: ${dq == null ? '—' : `${dq}%`}`].join('\n');
 
     const open = () => { if (zoom) return; setZoom(true); setTimeout(() => onOpen(rig.rigId), 150); };
     const onKeyDown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
@@ -34,36 +49,68 @@ function RigTile({ rig, onOpen }) {
             aria-label={`Open rig ${rig.name} (${rig.rigId})`}
             onClick={open}
             onKeyDown={onKeyDown}
-            title={`${rig.name} · ${rig.activeActivity || '—'} · ${location}`}
+            title={tip}
+            elevation={0}
             sx={{
-                px: 1, py: 0.85, height: '100%', display: 'flex', flexDirection: 'column', gap: 0.5,
-                cursor: 'pointer', borderLeft: `3px solid ${color}`, bgcolor: `${color}0d`,
-                transition: 'transform 150ms ease, box-shadow 150ms ease',
-                transform: zoom ? 'scale(1.05)' : 'scale(1)',
-                boxShadow: zoom ? `0 0 0 1px ${color}88, 0 8px 22px rgba(0,0,0,0.45)` : 'none',
-                '&:hover': { transform: zoom ? 'scale(1.05)' : 'translateY(-1px)', boxShadow: `0 0 0 1px ${color}55` },
+                height: '100%', flex: '1 0 176px', maxWidth: 230,
+                px: 1.25, py: 0.5, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 0.25,
+                overflow: 'hidden', cursor: 'pointer', opacity: live ? 1 : 0.55,
+                bgcolor: 'rgba(255,255,255,0.035)', border: '1px solid rgba(148,163,184,0.14)', borderLeft: `3px solid ${color}`, borderRadius: 1.5,
+                transition: 'transform 150ms ease, border-color 150ms ease, background-color 150ms ease',
+                transform: zoom ? 'scale(1.04)' : 'none',
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(148,163,184,0.32)', borderLeftColor: color },
                 '&:focus-visible': { outline: `2px solid ${color}`, outlineOffset: 2 },
             }}
         >
-            {/* One line: rig name · activity · location. */}
-            <Typography variant="body2" noWrap sx={{ lineHeight: 1.2 }}>
-                <Box component="span" sx={{ width: 7, height: 7, borderRadius: '50%', bgcolor: color, display: 'inline-block', mr: 0.6, verticalAlign: 'middle' }} />
-                <Box component="span" sx={{ fontWeight: 800 }}>{rig.name}</Box>
-                <Box component="span" sx={{ color: 'text.secondary' }}> · {rig.activeActivity || '—'} · {location}</Box>
+            <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0 }}>
+                <Typography noWrap sx={{ fontSize: '0.8rem', fontWeight: 700, lineHeight: 1.3, color: 'text.secondary', flex: 1, minWidth: 0, fontFamily: 'monospace' }}>{rig.rigId}</Typography>
+                {live && rig.alarm?.highest && <AlarmTag priority={rig.alarm.highest} />}
+            </Stack>
+            <Typography noWrap sx={{ fontSize: '1rem', fontWeight: 800, lineHeight: 1.25, color: well ? 'text.primary' : 'text.disabled' }}>
+                {well || 'No active well'}
             </Typography>
-
-            {/* Short health bar + alarm. */}
-            <Stack direction="row" alignItems="center" spacing={0.75}>
-                <Box sx={{ width: 56, height: 5, borderRadius: 3, bgcolor: 'rgba(255,255,255,0.08)', overflow: 'hidden', flex: '0 0 auto' }}>
-                    <Box sx={{ width: `${hv}%`, height: '100%', bgcolor: healthColor(hv) }} />
-                </Box>
-                <Typography variant="caption" sx={{ color: healthColor(hv), fontWeight: 700, width: 22 }}>{hv}</Typography>
-                <Box sx={{ flexGrow: 1 }} />
-                {rig.alarm?.highest
-                    ? <PriorityChip priority={rig.alarm.highest} />
-                    : <Box component="span" sx={{ width: 7, height: 7, borderRadius: '50%', bgcolor: STATUS_COLOR.online, opacity: 0.5 }} />}
+            <Stack direction="row" alignItems="baseline" spacing={1} sx={{ minWidth: 0 }}>
+                <Typography noWrap sx={{ fontSize: '0.72rem', fontWeight: 800, lineHeight: 1.3, letterSpacing: 0.6, textTransform: 'uppercase', color: opColor, flex: 1, minWidth: 0 }}>
+                    {operation || (live ? 'Idle' : rig.status)}
+                </Typography>
+                <Typography title="Data quality" sx={{ fontSize: '0.72rem', fontWeight: 700, lineHeight: 1.3, color: dqColor, flex: '0 0 auto' }}>
+                    {dq == null ? '—' : `${dq}%`}
+                </Typography>
             </Stack>
         </Paper>
+    );
+}
+
+// Compact alarm priority tag for a rig tile.
+function AlarmTag({ priority }) {
+    const c = { P1: '#ef4444', P2: '#f59e0b', P3: '#38bdf8' }[priority] || '#64748b';
+    return (
+        <Box component="span" sx={{ flex: '0 0 auto', px: 0.6, borderRadius: 0.75, fontSize: '0.68rem', fontWeight: 800, lineHeight: 1.6, color: c, bgcolor: `${c}22` }}>
+            {priority}
+        </Box>
+    );
+}
+
+// One asset unit as a horizontal strip: the unit label on the left, then its rig
+// tiles side by side (scrolling sideways if a unit has more than fit). Strips
+// share the available height equally so the whole fleet fits on one screen.
+function UnitRow({ unit, rigs, onOpen }) {
+    const live = rigs.filter((r) => r.status === 'online' || r.status === 'degraded' || r.status === 'stale').length;
+    const p1 = rigs.reduce((n, r) => n + (r.status !== 'offline' && r.status !== 'pending' ? (r.alarm?.p1 || 0) : 0), 0);
+    return (
+        <Box sx={{ flex: '1 1 0', minHeight: 66, maxHeight: 150, display: 'flex', gap: 1, alignItems: 'stretch' }}>
+            <Box sx={{ width: 128, flex: '0 0 auto', py: 0.5, pr: 1, borderRight: '1px solid rgba(148,163,184,.2)',
+                display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 0.5, minHeight: 0, overflow: 'hidden' }}>
+                <Typography variant="body2" sx={{ fontWeight: 800, lineHeight: 1.15 }}>{unit}</Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.2 }}>
+                    {rigs.length} rig{rigs.length !== 1 ? 's' : ''} · <Box component="span" sx={{ color: STATUS_COLOR.online }}>{live} live</Box>
+                </Typography>
+                {p1 > 0 && <Chip size="small" label={`${p1} P1`} color="error" sx={{ height: 18, fontWeight: 800, alignSelf: 'flex-start' }} />}
+            </Box>
+            <Box sx={{ flex: 1, minWidth: 0, display: 'flex', gap: 1, overflowX: 'auto', overflowY: 'hidden', py: 0.25 }}>
+                {rigs.map((r) => <RigTile key={r.rigId} rig={r} onOpen={onOpen} />)}
+            </Box>
+        </Box>
     );
 }
 
@@ -104,11 +151,13 @@ function FleetMessageCentre({ openSignal, onOpenRig }) {
         <>
             <Button
                 variant="outlined"
+                size="small"
+                title="Central Message Centre"
                 startIcon={<ChatBubbleOutline fontSize="small" />}
                 onClick={() => setOpen(true)}
-                sx={{ borderColor: 'rgba(56,189,248,.45)', color: '#38bdf8', fontWeight: 900, bgcolor: 'rgba(15,23,42,.55)' }}
+                sx={{ borderColor: 'rgba(56,189,248,.45)', color: '#38bdf8', fontWeight: 900, bgcolor: 'rgba(15,23,42,.55)', whiteSpace: 'nowrap' }}
             >
-                Central Message Centre
+                Messages
             </Button>
             <Dialog open={open} onClose={() => setOpen(false)} maxWidth="md" fullWidth PaperProps={{ sx: { bgcolor: '#172235', color: 'white', border: '1px solid rgba(56,189,248,.25)' } }}>
                 <DialogTitle sx={{ fontWeight: 900, color: 'primary.main' }}>Central Message Centre - All Rigs</DialogTitle>
@@ -204,9 +253,23 @@ export default function FleetOverview() {
     const rows = useMemo(() => fleet.filter((r) => {
         if (filter !== 'all' && r.status !== filter) return false;
         if (unit !== 'all' && (r.assetUnit || r.field) !== unit) return false;
-        if (q && !(`${r.name} ${r.rigId} ${r.assetUnit || r.field || ''} ${r.activeJob || ''}`.toLowerCase().includes(q.toLowerCase()))) return false;
+        if (q && !(`${r.name} ${r.rigId} ${r.assetUnit || ''} ${r.field || ''} ${r.activeJob || ''} ${r.currentWellName || ''} ${r.activeActivity || ''}`.toLowerCase().includes(q.toLowerCase()))) return false;
         return true;
     }), [fleet, filter, unit, q]);
+
+    // Group by asset unit (field when no unit is set); units and rigs sorted by name.
+    const groups = useMemo(() => {
+        const by = new Map();
+        for (const r of rows) {
+            const u = r.assetUnit || r.field || 'Unassigned';
+            if (!by.has(u)) by.set(u, []);
+            by.get(u).push(r);
+        }
+        const cmp = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true });
+        return [...by.entries()]
+            .sort(([a], [b]) => (a === 'Unassigned') - (b === 'Unassigned') || cmp(a, b))
+            .map(([u, list]) => [u, list.slice().sort((a, b) => cmp(a.name, b.name))]);
+    }, [rows]);
 
     return (
         // Full-height two-pane: interactive map (left) + rig tiles (right). The status
@@ -214,20 +277,17 @@ export default function FleetOverview() {
         <Box sx={{ height: '100%', display: 'flex', flexDirection: { xs: 'column', md: 'row' }, gap: 2, minHeight: 0 }}>
             <FleetMessagePopup onOpenCentre={() => setCentreOpenSignal((v) => v + 1)} />
             {/* LEFT — smaller interactive pan/zoom map; click a marker to open the rig. */}
-            <Box sx={{ flex: { md: '0.85 1 0' }, minHeight: { xs: 300, md: 0 }, display: 'flex' }}>
+            <Box sx={{ flex: { md: '0.6 1 0' }, minHeight: { xs: 300, md: 0 }, display: 'flex' }}>
                 <FleetMap rigs={fleet} />
             </Box>
 
-            {/* RIGHT — denser grid of compact rig tiles, filling the (now larger) pane. */}
-            <Box sx={{ flex: { md: '1.7 1 0' }, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            {/* RIGHT — one horizontal strip of rig tiles per asset unit. */}
+            <Box sx={{ flex: { md: '1.9 1 0' }, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
                 <Paper sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-                    <Box sx={{ p: 1.5, flex: '0 0 auto' }}>
-                        <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
-                            <Typography variant="h6">Fleet — {rows.length} rig{rows.length !== 1 ? 's' : ''}</Typography>
-                            <FleetMessageCentre openSignal={centreOpenSignal} onOpenRig={(id) => nav(`/rigs/${id}`)} />
-                        </Stack>
-                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                            <TextField size="small" placeholder="Search rig / unit / job" value={q} onChange={(e) => setQ(e.target.value)} sx={{ flex: 1, minWidth: 160 }}
+                    <Box sx={{ p: 1.25, flex: '0 0 auto' }}>
+                        <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
+                            <Typography variant="h6" sx={{ mr: 0.5 }}>Fleet — {rows.length} rig{rows.length !== 1 ? 's' : ''}</Typography>
+                            <TextField size="small" placeholder="Search rig / unit / well" value={q} onChange={(e) => setQ(e.target.value)} sx={{ flex: 1, minWidth: 140 }}
                                 InputProps={{ startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment> }} />
                             <FormControl size="small" sx={{ minWidth: 150 }}>
                                 <InputLabel id="asset-unit-label">Asset unit</InputLabel>
@@ -236,21 +296,19 @@ export default function FleetOverview() {
                                     {units.map((u) => <MenuItem key={u} value={u}>{u}</MenuItem>)}
                                 </Select>
                             </FormControl>
+                            <ToggleButtonGroup size="small" exclusive value={filter} onChange={(_e, v) => v && setFilter(v)} sx={{ flexWrap: 'wrap' }}>
+                                <ToggleButton value="all">All</ToggleButton>
+                                <ToggleButton value="online">Online</ToggleButton>
+                                <ToggleButton value="degraded">Degraded</ToggleButton>
+                                <ToggleButton value="offline">Offline</ToggleButton>
+                                <ToggleButton value="pending">Pending</ToggleButton>
+                            </ToggleButtonGroup>
+                            <FleetMessageCentre openSignal={centreOpenSignal} onOpenRig={(id) => nav(`/rigs/${id}`)} />
                         </Stack>
-                        <ToggleButtonGroup size="small" exclusive value={filter} onChange={(_e, v) => v && setFilter(v)} sx={{ mt: 1, flexWrap: 'wrap' }}>
-                            <ToggleButton value="all">All</ToggleButton>
-                            <ToggleButton value="online">Online</ToggleButton>
-                            <ToggleButton value="degraded">Degraded</ToggleButton>
-                            <ToggleButton value="offline">Offline</ToggleButton>
-                            <ToggleButton value="pending">Pending</ToggleButton>
-                        </ToggleButtonGroup>
                     </Box>
 
-                    <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', px: 1.5, pb: 1.5 }}>
-                        {/* Container-relative grid: many compact tiles per row. */}
-                        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(168px, 1fr))', gap: 1, alignItems: 'stretch' }}>
-                            {rows.map((r) => <RigTile key={r.rigId} rig={r} onOpen={(id) => nav(`/rigs/${id}`)} />)}
-                        </Box>
+                    <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 1.25, pb: 1.25, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+                        {groups.map(([u, list]) => <UnitRow key={u} unit={u} rigs={list} onOpen={(id) => nav(`/rigs/${id}`)} />)}
                         {!rows.length && (
                             <Box sx={{ py: 6, textAlign: 'center', color: 'text.secondary' }}>
                                 <Typography variant="body2">No rigs match the filter.</Typography>
