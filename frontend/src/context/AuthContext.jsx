@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
-import { api, setToken } from '../api';
+import { api } from '../api';
 
 const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
@@ -23,15 +23,14 @@ export function AuthProvider({ children }) {
     }, [!!user]);
 
     const login = useCallback(async (username, password) => {
-        const { token, user } = await api.login(username, password);
-        setToken(token);
+        const { user } = await api.login(username, password);
         localStorage.setItem('crmf_user', JSON.stringify(user));
         setUser(user);
         return user;
     }, []);
 
     const logout = useCallback(() => {
-        setToken(null);
+        api.logout().catch(() => {});
         localStorage.removeItem('crmf_user');
         setUser(null);
     }, []);

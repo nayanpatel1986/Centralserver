@@ -99,7 +99,14 @@ const app = express();
 // nginx); the Delhi HA deployment adds a TLS proxy in front of that, so it
 // sets TRUST_PROXY_HOPS=2 — otherwise every client collapses into one IP
 // and the login/API rate limiters throttle the whole site as a single user.
-app.set('trust proxy', Math.max(1, Number(process.env.TRUST_PROXY_HOPS) || 1));
+// TRUST_PROXY overrides this with an Express trust-proxy value: the Windows
+// offline bundle sets 'loopback' because its backend port is reachable directly
+// on the LAN, where trusting one hop would let any client pick its own req.ip
+// through X-Forwarded-For and walk around the per-IP login limiter.
+const TRUST_PROXY = String(process.env.TRUST_PROXY || '').trim();
+app.set('trust proxy', TRUST_PROXY
+    ? (/^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY)
+    : Math.max(1, Number(process.env.TRUST_PROXY_HOPS) || 1));
 // Port 8090 serves plain HTTP. Helmet's default upgrade-insecure-requests CSP
 // changes its JS/CSS URLs to HTTPS on that same port, leaving LAN-IP pages blank.
 // Keep the upgrade directive when traffic arrives through the HTTPS proxy.
@@ -112,12 +119,27 @@ app.use((req, res, next) => {
 app.use(cors(corsOptions));
 
 const server = http.createServer(app);
+// Browser sockets now authenticate with the session cookie, and engine.io does
+// not apply the CORS policy to WebSocket upgrades. Refuse any handshake whose
+// Origin is neither this host nor allowlisted (cross-site WebSocket hijacking).
+// Edge servers send no Origin and are unaffected.
+function isSameOrAllowedOrigin(req) {
+    const origin = req.headers.origin;
+    if (!origin || isAllowedOrigin(origin)) return true;
+    try { return new URL(origin).host === String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim(); }
+    catch { return false; }
+}
 const io = new Server(server, {
     cors: {
         origin(origin, cb) { cb(null, isAllowedOrigin(origin)); },
     },
+    allowRequest: (req, cb) => cb(null, isSameOrAllowedOrigin(req)),
 });
 io.use(auth.socketAuth);
+// Fleet telemetry broadcasts go to portal users only. A rig's edge connection
+// authenticates with that rig's own credential and must not receive other
+// rigs' live data. Operator messages (rig_message_update) stay fleet-visible.
+const PORTAL_ROOM = 'portal';
 io.on('connection', (socket) => {
     if (socket.clientType === 'edge' && socket.edgeRigId) {
         const rigRoom = `edge:${socket.edgeRigId}`;
@@ -166,6 +188,7 @@ io.on('connection', (socket) => {
         });
         return;
     }
+    socket.join(PORTAL_ROOM);
     fleet.getFleetSummary().then((s) => socket.emit('fleet_summary', s)).catch(() => {});
 });
 
@@ -181,16 +204,35 @@ function emitRigMessage(row) {
 // publisher in backend/lib/sync.js. Generous limit + lenient rate limit (rigs only).
 // --------------------------------------------------------------------
 const ingestLimiter = rateLimit({ windowMs: 60_000, max: 6000, standardHeaders: true, legacyHeaders: false });
+// Ceiling for the magic-byte gunzip fallback below. Without it a small gzip of
+// zeros inflates to gigabytes synchronously, before the token is checked.
+const INGEST_MAX_INFLATED_BYTES = Math.max(1024 * 1024, Number(process.env.INGEST_MAX_INFLATED_BYTES) || 64 * 1024 * 1024);
+const INGEST_OPEN = process.env.ALLOW_OPEN_INGEST === 'true' && !IS_PROD;
 
-// body-parser auto-inflates Content-Encoding: gzip (the edge sets it). The magic-byte
-// fallback covers any client whose body still arrives gzipped.
-app.post('/ingest', ingestLimiter, express.raw({ type: '*/*', limit: '64mb' }), async (req, res) => {
+// Cheap pre-auth gate: a batch without a bearer token can never be accepted
+// (unless open ingest is enabled for dev), so reject it before reading,
+// inflating or parsing up to 64 MB of untrusted body.
+function requireIngestBearer(req, res, next) {
+    const hdr = req.headers.authorization || '';
+    if (INGEST_OPEN || (hdr.startsWith('Bearer ') && hdr.length > 7)) return next();
+    metrics.observeIngest({ ok: false, durationSec: 0 });
+    return res.status(401).json({ error: 'unauthorized device' });
+}
+
+// body-parser auto-inflates Content-Encoding: gzip (the edge sets it) and applies
+// the 64 MB limit to the inflated size. The magic-byte fallback covers any client
+// whose body still arrives gzipped, under its own inflated-size ceiling.
+app.post('/ingest', ingestLimiter, requireIngestBearer, express.raw({ type: '*/*', limit: '64mb' }), async (req, res) => {
     const startedAt = process.hrtime.bigint();
     const elapsedSec = () => Number(process.hrtime.bigint() - startedAt) / 1e9;
     try {
         let buf = req.body;
         if (Buffer.isBuffer(buf) && buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
-            try { buf = zlib.gunzipSync(buf); } catch { metrics.observeIngest({ ok: false, durationSec: elapsedSec() }); return res.status(400).json({ error: 'bad gzip' }); }
+            try { buf = zlib.gunzipSync(buf, { maxOutputLength: INGEST_MAX_INFLATED_BYTES }); } catch (e) {
+                metrics.observeIngest({ ok: false, durationSec: elapsedSec() });
+                if (e && e.code === 'ERR_BUFFER_TOO_LARGE') return res.status(413).json({ error: 'batch too large' });
+                return res.status(400).json({ error: 'bad gzip' });
+            }
         }
         let batch;
         try { batch = JSON.parse(buf.toString('utf8')); } catch { metrics.observeIngest({ ok: false, durationSec: elapsedSec() }); return res.status(400).json({ error: 'bad json' }); }
@@ -229,10 +271,10 @@ app.post('/ingest', ingestLimiter, express.raw({ type: '*/*', limit: '64mb' }), 
         // Push a live fleet delta to portal clients (best effort), and dispatch any
         // rising-edge alarm notification (webhook/email; no-op unless NOTIFY_ENABLED).
         fleet.getFleetRow(result.rigId).then((row) => {
-            if (row) io.emit('fleet_update', row);
+            if (row) io.to(PORTAL_ROOM).emit('fleet_update', row);
             rigview.reconstruct(result.rigId).then((live) => {
                 if (live) {
-                    io.emit('rig_live', { rigId: result.rigId, data: live });
+                    io.to(PORTAL_ROOM).emit('rig_live', { rigId: result.rigId, data: live });
                     etp20Server.broadcastRigLive(result.rigId, live);
                 }
             }).catch(() => {});
@@ -244,10 +286,10 @@ app.post('/ingest', ingestLimiter, express.raw({ type: '*/*', limit: '64mb' }), 
             if (result.alarmTransition) notify.maybeNotify(result.rigId, result.alarmTransition, {});
         });
         if (Array.isArray(batch.events) && batch.events.some((e) => e && e.type === 'alarm')) {
-            io.emit('alarm_update', { rigId: result.rigId });
+            io.to(PORTAL_ROOM).emit('alarm_update', { rigId: result.rigId });
         }
         if (result.lifecycle) {
-            io.emit('wells_update', { rigId: result.rigId, ...result.lifecycle });
+            io.to(PORTAL_ROOM).emit('wells_update', { rigId: result.rigId, ...result.lifecycle });
         }
 
         // receivedPoints is what the database ACTUALLY stored (insert rowCount),
@@ -316,6 +358,17 @@ app.get('/api/v1/openapi.json', serveOpenapi);
 const apiLimiter = rateLimit({ windowMs: 60_000, max: Number(process.env.API_RATE_LIMIT_PER_MIN || 3000), standardHeaders: true, legacyHeaders: false });
 // Stricter, dedicated limiter on login (audit #13): cap brute-force attempts.
 const loginLimiter = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false });
+// Per-account limiter keyed on the submitted username, independent of the client
+// address: brute force against one account stays capped even when req.ip can be
+// varied (spoofed forwarding headers, many source hosts).
+const loginUserLimiter = rateLimit({
+    windowMs: 15 * 60_000,
+    max: Number(process.env.LOGIN_MAX_PER_USER_15MIN || 20),
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => `user:${String(req.body?.username || '').trim().toLowerCase().slice(0, 128)}`,
+    message: { error: 'too many login attempts for this account; try again later' },
+});
 
 const jsonBody = express.json({ limit: '1mb' });
 
@@ -327,7 +380,7 @@ function buildApiRouter() {
     // ----- Auth (auth-exempt: login + me handle their own auth) -----
     // Tells the login UI which providers are available (local / LDAP / both).
     r.get('/auth/info', (_req, res) => res.json(ldap.info()));
-    r.post('/auth/login', loginLimiter, async (req, res) => {
+    r.post('/auth/login', loginLimiter, loginUserLimiter, async (req, res) => {
         const { username, password } = req.body || {};
         const result = await auth.login(username, password);
         if (!result) {
@@ -339,7 +392,14 @@ function buildApiRouter() {
         }
         await query('INSERT INTO audit_log (actor, action, target) VALUES ($1,$2,$3)',
             [username, 'login', 'portal']).catch(() => {});
+        auth.setSessionCookie(res, result.token, req.secure);
         res.json(result);
+    });
+    // Clears the portal session cookie. Auth-exempt so an expired session can
+    // still sign out cleanly.
+    r.post('/auth/logout', (req, res) => {
+        auth.clearSessionCookie(res, req.secure);
+        res.json({ ok: true });
     });
     r.get('/auth/me', auth.requireAuth, (req, res) => res.json({ user: req.user }));
 
@@ -461,10 +521,10 @@ function buildApiRouter() {
     r.get('/wells/:id/runs', wrap((req) => wells.getRuns(req.params.id)));
     r.delete('/wells/:id', requireRoleAudited('admin'), wrap(async (req) => {
         const result = await wells.deleteWell(req.params.id, req.user?.username || 'system');
-        io.emit('wells_update', { wellId: req.params.id, deleted: true, rigId: result.rigId || null });
+        io.to(PORTAL_ROOM).emit('wells_update', { wellId: req.params.id, deleted: true, rigId: result.rigId || null });
         if (result.rigId) {
             fleet.getFleetRow(result.rigId).then((row) => {
-                if (row) io.emit('fleet_update', row);
+                if (row) io.to(PORTAL_ROOM).emit('fleet_update', row);
             }).catch(() => {});
         }
         return result;
@@ -576,8 +636,8 @@ function buildApiRouter() {
         // Reveal the device token ONCE to the creating admin so it can be set as
         // DEVICE_TOKEN on the rig's edge node. It is not exposed again by the API.
         const created = await fleet.getRig(rigId);
-        if (created) io.emit('fleet_update', created);
-        io.emit('fleet_summary', await fleet.getFleetSummary());
+        if (created) io.to(PORTAL_ROOM).emit('fleet_update', created);
+        io.to(PORTAL_ROOM).emit('fleet_summary', await fleet.getFleetSummary());
         return { ...created, device_token: deviceToken };
     }));
     r.delete('/rigs/:id', requireRoleAudited('admin'), wrap(async (req) => {
@@ -586,8 +646,8 @@ function buildApiRouter() {
         if (!rowCount) throw Object.assign(new Error('rig not found'), { status: 404 });
         await query('INSERT INTO audit_log (actor, action, target, detail) VALUES ($1,$2,$3,$4)',
             [req.user.username, 'rig.delete', rigId, {}]).catch(() => {});
-        io.emit('fleet_remove', rigId);
-        io.emit('fleet_summary', await fleet.getFleetSummary());
+        io.to(PORTAL_ROOM).emit('fleet_remove', rigId);
+        io.to(PORTAL_ROOM).emit('fleet_summary', await fleet.getFleetSummary());
         return { ok: true };
     }));
     // Issue a NEW random credential for one rig. Admin-only + audited. Previously
@@ -601,7 +661,7 @@ function buildApiRouter() {
         await query('INSERT INTO audit_log (actor, action, target, detail) VALUES ($1,$2,$3,$4)',
             [req.user.username, 'rig.rotate_token', rigId, { rotated: true }]).catch(() => {});
         const updated = await fleet.getFleetRow(rigId);
-        if (updated) io.emit('fleet_update', updated);
+        if (updated) io.to(PORTAL_ROOM).emit('fleet_update', updated);
         // Shown once; the edge node must be updated with this DEVICE_TOKEN.
         return { device_token: deviceToken };
     }));
@@ -639,6 +699,14 @@ function buildApiRouter() {
         const saved = rows[0] ? rows[0].value : {};
         const next = { ...saved, ...patch };
         if (!String(patch.bindPassword || '').trim()) {
+            // Keeping the stored bind password while pointing the bind somewhere
+            // else would hand that service-account secret to the new server.
+            // Changing the URL or bind DN requires the password to be re-entered.
+            const current = ldap.getSafeConfig();
+            const changed = (k) => k in patch && String(patch[k] || '').trim() !== String(current[k] || '').trim();
+            if ((changed('url') || changed('bindDN')) && (saved.bindPassword || ldap._cfg.bindPassword)) {
+                throw Object.assign(new Error('re-enter the bind password when changing the LDAP URL or bind DN'), { status: 400 });
+            }
             if (saved.bindPassword) next.bindPassword = saved.bindPassword;
             else delete next.bindPassword;
         }
@@ -870,8 +938,9 @@ function buildApiRouter() {
         })));
 
     // ----- Alarm notifications (webhook/email; proposal §6.1 escalation) -----
-    r.get('/notifications', wrap((req) => notify.getNotifications(req.query.limit)));
-    r.get('/notifications/channels', wrap(() => notify.getChannels()));
+    const isAdmin = (req) => auth.roleMeets(req.user && req.user.role, 'admin');
+    r.get('/notifications', wrap((req) => notify.getNotifications(req.query.limit, { reveal: isAdmin(req) })));
+    r.get('/notifications/channels', wrap((req) => notify.getChannels({ reveal: isAdmin(req) })));
     r.post('/notifications/channels', requireRoleAudited('admin'),
         wrap((req) => notify.addChannel(req.body, req.user.username)));
     r.patch('/notifications/channels/:id', requireRoleAudited('admin'),
@@ -898,8 +967,12 @@ function buildApiRouter() {
             const { period, rows } = await gov.getFleetReportPeriod(req.query.period);
             const cols = rows.length ? Object.keys(rows[0]) : ['rig_id'];
             const csv = [cols.join(',')].concat(rows.map((row) => cols.map((c) => {
-                const v = row[c] == null ? '' : String(row[c]).replace(/"/g, '""');
-                return /[",\n]/.test(v) ? `"${v}"` : v;
+                let v = row[c] == null ? '' : String(row[c]);
+                // Neutralise spreadsheet formulas (CSV injection): rig names can
+                // arrive from the wire, and Excel evaluates a leading = + - @.
+                if (typeof row[c] === 'string' && /^[=+\-@\t\r]/.test(v)) v = `'${v}`;
+                v = v.replace(/"/g, '""');
+                return /[",\n\r]/.test(v) ? `"${v}"` : v;
             }).join(','))).join('\n');
             res.setHeader('Content-Type', 'text/csv');
             res.setHeader('Content-Disposition', `attachment; filename="crmf-fleet-report-${period || 'snapshot'}.csv"`);
@@ -954,9 +1027,9 @@ async function main() {
             const flipped = await fleet.sweepOffline();
             for (const id of flipped) {
                 const row = await fleet.getFleetRow(id);
-                if (row) io.emit('fleet_update', row);
+                if (row) io.to(PORTAL_ROOM).emit('fleet_update', row);
             }
-            if (flipped.length) io.emit('fleet_summary', await fleet.getFleetSummary());
+            if (flipped.length) io.to(PORTAL_ROOM).emit('fleet_summary', await fleet.getFleetSummary());
         } catch (e) { /* ignore */ }
     }, 15_000);
 
@@ -965,7 +1038,7 @@ async function main() {
     summaryTimer = setInterval(async () => {
         try {
             const summary = await fleet.getFleetSummary();
-            io.emit('fleet_summary', summary);
+            io.to(PORTAL_ROOM).emit('fleet_summary', summary);
             metrics.setFleetGauges(summary);
         } catch { /* ignore */ }
     }, 10_000);

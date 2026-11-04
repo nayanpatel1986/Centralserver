@@ -25,7 +25,7 @@ function channelMetadata(uri, id, metric, lastIndexUs) {
     };
 }
 
-function accept(ws, { rigId, token }) {
+function accept(ws, { rigId, token, sharedTokens = [] }) {
     const session = new EtpSession(ws, { side: 'server' });
     const channelsById = new Map();
     let nextChannelId = 1;
@@ -146,7 +146,7 @@ function accept(ws, { rigId, token }) {
                     seq: null, deviceId: rigId, createdAt: new Date().toISOString(),
                     channels: snapshots.slice(offset, offset + 1000), events: [],
                 };
-                const result = await ingestBatch({ rigId, token, schemaVersion: 'etp12-channel-data' }, batch);
+                const result = await ingestBatch({ rigId, token, sharedTokens, schemaVersion: 'etp12-channel-data' }, batch);
                 if (!result.ok) throw new Error(`ETP data ingest rejected: ${result.error || result.code}`);
                 status.pointsStored += result.points || 0;
             }

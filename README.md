@@ -30,7 +30,6 @@ cp .env.example .env
 #   JWT_SECRET    openssl rand -hex 32   (>=32 chars; placeholders are rejected)
 #   ADMIN_PASSWORD  your initial portal admin password (no default)
 #   INGEST_TOKEN  openssl rand -hex 24   (only the fallback for unprovisioned rigs)
-#   MCP_API_KEY   openssl rand -hex 24   (guards the optional /mcp endpoint)
 docker compose up -d --build
 ```
 
@@ -129,6 +128,12 @@ required by the offline launcher.
 | `admin` | `ADMIN_PASSWORD` from `.env` | admin (edit governance) |
 | `operator` | `OPERATOR_PASSWORD` from `.env` | operator |
 | `viewer` | `VIEWER_PASSWORD` from `.env` | viewer (read-only) |
+
+`ADMIN_PASSWORD` is applied when the `admin` account is first created. Later
+changes to it are ignored, so a disabled or re-passworded admin stays that way
+across restarts. To deliberately reset the admin password (for example after
+moving a database to another PC), start once with `ADMIN_PASSWORD_RESET=true`,
+then remove that setting.
 
 Point rig-edge agents at the reachable CRMF HTTPS address via their `CENTRAL_URL`:
 the configured HTTPS port for the Windows offline bundle, or the deployed

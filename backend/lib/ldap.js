@@ -60,7 +60,9 @@ function newClient() {
 
 function mapRole(memberOf) {
     const groups = (Array.isArray(memberOf) ? memberOf : memberOf ? [memberOf] : []).map((g) => String(g).toLowerCase());
-    const inAny = (names) => names.some((n) => groups.some((g) => g === n || g.includes(`cn=${n},`) || g.includes(n)));
+    // Exact match only: the bare group name, the full DN, or a DN whose FIRST RDN
+    // is cn=<name>. Substring matching made "cn=crmf-admins-requests,..." admin.
+    const inAny = (names) => names.some((n) => groups.some((g) => g === n || g.startsWith(`cn=${n},`)));
     if (cfg.groupAdmin.length && inAny(cfg.groupAdmin)) return 'admin';
     if (cfg.groupOperator.length && inAny(cfg.groupOperator)) return 'operator';
     if (cfg.groupViewer.length && inAny(cfg.groupViewer)) return 'viewer';

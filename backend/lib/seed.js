@@ -146,18 +146,25 @@ async function seedUsers() {
     const operatorPw = process.env.OPERATOR_PASSWORD || 'operator123';
     const viewerPw = process.env.VIEWER_PASSWORD || 'viewer123';
 
-    // Keep the break-glass admin password aligned with ADMIN_PASSWORD even when
-    // an existing database volume is moved to another offline PC.
-    await query(
+    // Create the break-glass admin on first boot only. Re-applying it every boot
+    // silently re-enabled an admin account that had been disabled (e.g. after a
+    // compromise) and reverted its password. To deliberately realign the password
+    // (e.g. a database volume moved to another offline PC), start once with
+    // ADMIN_PASSWORD_RESET=true.
+    const adminHash = hash(adminPw);
+    const created = await query(
         `INSERT INTO users (username, password, display, role, source)
          VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (username) DO UPDATE SET
-           password = EXCLUDED.password,
-           display = EXCLUDED.display,
-           role = EXCLUDED.role,
-           source = EXCLUDED.source,
-           disabled = false`,
-        ['admin', hash(adminPw), 'Asset Administrator', 'admin', 'local']);
+         ON CONFLICT (username) DO NOTHING`,
+        ['admin', adminHash, 'Asset Administrator', 'admin', 'local']);
+    if (!created.rowCount && String(process.env.ADMIN_PASSWORD_RESET || '').toLowerCase() === 'true') {
+        await query(
+            `UPDATE users SET password = $1, role = 'admin', source = 'local', disabled = false
+             WHERE username = 'admin'`, [adminHash]);
+        await query('INSERT INTO audit_log (actor, action, target, detail) VALUES ($1,$2,$3,$4)',
+            ['system', 'user.admin_reset', 'admin', { reason: 'ADMIN_PASSWORD_RESET' }]).catch(() => {});
+        console.warn('Seed: ADMIN_PASSWORD_RESET=true - admin password reset and account re-enabled. Unset it now.');
+    }
 
     const users = [
         ['operator', operatorPw, 'Monitoring Operator', 'operator'],
@@ -265,7 +272,7 @@ async function seedMaintenance() {
 }
 
 // Seed a demo webhook notification channel when NOTIFY_DEMO_WEBHOOK_URL is set
-// (compose points it at the notify-sink), so P1 alerts are demonstrable end-to-end.
+// (e.g. a local demo receiver), so P1 alerts are demonstrable end-to-end.
 async function seedNotificationChannels() {
     const url = process.env.NOTIFY_DEMO_WEBHOOK_URL;
     if (!url) return;

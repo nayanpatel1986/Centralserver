@@ -191,7 +191,7 @@ function RigMessageButton({ rig }) {
                                     {m.replyText && (
                                         <Box sx={{ mt: 1, p: 1, borderLeft: '4px solid #22c55e', bgcolor: 'rgba(34,197,94,.12)', borderRadius: 1 }}>
                                             <Typography variant="caption" sx={{ color: '#bbf7d0', fontWeight: 900 }}>
-                                                Reply from Edge {m.repliedBy ? `by ${m.repliedBy}` : ''}{m.repliedAt ? ` · ${new Date(m.repliedAt).toLocaleString()}` : ''}
+                                                Reply from {m.targetRigName || m.targetRigId} crew {m.repliedBy ? `by ${m.repliedBy}` : ''}{m.repliedAt ? ` · ${new Date(m.repliedAt).toLocaleString()}` : ''}
                                             </Typography>
                                             <Typography sx={{ color: '#eafff2', whiteSpace: 'pre-wrap', fontWeight: 800 }}>{m.replyText}</Typography>
                                         </Box>
@@ -201,7 +201,7 @@ function RigMessageButton({ rig }) {
                                         <Typography variant="caption" color="text.secondary">
                                             Sent {m.sentAt ? new Date(m.sentAt).toLocaleString() : '--'} by {m.senderDisplay || m.senderUsername || '--'}
                                             {m.deliveredAt ? ` · Delivered ${new Date(m.deliveredAt).toLocaleString()}` : ''}
-                                            {m.acknowledgedAt ? ` · Ack ${new Date(m.acknowledgedAt).toLocaleString()} by ${m.acknowledgedBy || 'edge'}` : ''}
+                                            {m.acknowledgedAt ? ` · Ack ${new Date(m.acknowledgedAt).toLocaleString()} by ${m.acknowledgedBy || 'rig crew'}` : ''}
                                         </Typography>
                                         <Box sx={{ flexGrow: 1 }} />
                                         {m.status === 'failed' && <Button size="small" onClick={() => retry(m.messageId)}>Retry</Button>}

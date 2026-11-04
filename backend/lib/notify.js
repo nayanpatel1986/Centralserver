@@ -149,9 +149,21 @@ async function maybeNotify(rigId, transition, meta = {}) {
 }
 
 // ----- admin/API surface -----
-async function getChannels() {
+// Webhook URLs usually embed their credential (Slack/Teams/PagerDuty), so only
+// admins see full targets. Everyone else gets the scheme + host or a masked email.
+function maskTarget(target) {
+    const t = String(target || '');
+    if (!t) return t;
+    if (t.includes('@') && !t.includes('://')) {
+        const [local, domain] = t.split('@');
+        return `${local.slice(0, 1)}***@${domain}`;
+    }
+    try { const u = new URL(t); return `${u.protocol}//${u.host}/…`; } catch { return '***'; }
+}
+
+async function getChannels({ reveal = false } = {}) {
     const { rows } = await query('SELECT * FROM notification_channels ORDER BY id');
-    return rows;
+    return reveal ? rows : rows.map((r) => ({ ...r, target: maskTarget(r.target) }));
 }
 async function addChannel({ type, name, target, min_severity = 'P1', enabled = true }, actor) {
     if (!['webhook', 'email'].includes(type)) throw Object.assign(new Error('type must be webhook|email'), { status: 400 });
@@ -181,10 +193,10 @@ async function deleteChannel(id, actor) {
         [actor || 'system', 'notification.channel.delete', String(id)]).catch(() => {});
     return { ok: true };
 }
-async function getNotifications(limit = 100) {
+async function getNotifications(limit = 100, { reveal = false } = {}) {
     const { rows } = await query(
         'SELECT * FROM notifications ORDER BY ts DESC LIMIT $1', [Math.min(Number(limit) || 100, 500)]);
-    return rows;
+    return reveal ? rows : rows.map((r) => ({ ...r, channel_target: maskTarget(r.channel_target) }));
 }
 // Fire a synthetic test notification through one channel (admin-triggered).
 async function sendTest(channelId, actor) {

@@ -3,8 +3,11 @@ import axios from 'axios';
 // Same-origin: nginx proxies /api and /socket.io to the CRMF backend.
 axios.defaults.baseURL = '';
 
-const stored = localStorage.getItem('crmf_token');
-if (stored) axios.defaults.headers.common['Authorization'] = 'Bearer ' + stored;
+// The session JWT lives in an HttpOnly cookie set by /api/auth/login; page
+// script never sees it. State-changing requests must carry this header (the
+// backend's CSRF check for cookie sessions).
+axios.defaults.headers.common['X-CRMF-Request'] = '1';
+localStorage.removeItem('crmf_token'); // drop tokens stored by older builds
 
 let handling401 = false;
 axios.interceptors.response.use(
@@ -12,9 +15,7 @@ axios.interceptors.response.use(
     (error) => {
         if (error?.response?.status === 401 && !handling401) {
             handling401 = true;
-            localStorage.removeItem('crmf_token');
             localStorage.removeItem('crmf_user');
-            delete axios.defaults.headers.common['Authorization'];
             if (window.location.pathname !== '/login') window.location.assign('/login');
             else handling401 = false;
         }
@@ -31,19 +32,10 @@ const PHASE_COLORS = {
 };
 export const phaseColor = (phase) => PHASE_COLORS[String(phase || '').toUpperCase()] || '#64748b';
 
-export const setToken = (token) => {
-    if (token) {
-        localStorage.setItem('crmf_token', token);
-        axios.defaults.headers.common['Authorization'] = 'Bearer ' + token;
-    } else {
-        localStorage.removeItem('crmf_token');
-        delete axios.defaults.headers.common['Authorization'];
-    }
-};
-
 export const api = {
     authInfo: () => axios.get('/api/auth/info').then((r) => r.data),
     login: (username, password) => axios.post('/api/auth/login', { username, password }).then((r) => r.data),
+    logout: () => axios.post('/api/auth/logout').then((r) => r.data),
     me: () => axios.get('/api/auth/me').then((r) => r.data),
     fleet: () => axios.get('/api/fleet').then((r) => r.data),
     summary: () => axios.get('/api/fleet/summary').then((r) => r.data),

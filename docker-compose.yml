@@ -144,42 +144,9 @@ services:
       crmf-backend:
         condition: service_healthy
 
-  # DEMO ONLY (RESTORED): webhook receiver standing in for an enterprise endpoint
-  # (Slack/Teams/PagerDuty/SMS gateway). The backend POSTs P1 alarm alerts here.
-  # Inspect with: docker exec crmf_notify_sink wget -qO- localhost:9020/received
-  notify-sink:
-    build: ./notify-sink
-    container_name: crmf_notify_sink
-    restart: unless-stopped
-    profiles: ["demo"]
-    environment:
-      - PORT=9020
-
-  # Read-only MCP server — agentic AI access to the CRMF fleet over the MCP
-  # streamable-HTTP transport. Mints a VIEWER JWT so central RBAC blocks every
-  # write; exposes only GET-backed fleet tools. MCP_API_KEY is REQUIRED.
-  crmf-mcp:
-    build:
-      context: ./mcp-server
-      dockerfile: Dockerfile
-    container_name: crmf_mcp
-    restart: unless-stopped
-    cpus: 0.25
-    mem_limit: 192m
-    mem_reservation: 48m
-    environment:
-      - NODE_ENV=production
-      - PORT=3000
-      - BACKEND_URL=http://crmf-backend:6000
-      - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env}
-      - MCP_API_KEY=${MCP_API_KEY:?set MCP_API_KEY in .env (>=16 chars); it guards /mcp}
-    ports:
-      # Loopback-only by default. Point AI clients at http://127.0.0.1:8766/mcp ;
-      # set MCP_CENTRAL_BIND to expose on the ops LAN.
-      - "${MCP_CENTRAL_BIND:-127.0.0.1}:${MCP_CENTRAL_PORT:-8766}:3000"
-    depends_on:
-      crmf-backend:
-        condition: service_healthy
+  # The demo webhook receiver (notify-sink) and the read-only MCP server
+  # (mcp-server) are not part of this repository, so they are not defined here.
+  # Add them back alongside their source directories.
 
 volumes:
   crmf_pgdata:

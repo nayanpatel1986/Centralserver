@@ -111,7 +111,7 @@ function tsMillis(raw) {
 const RIG_ROW_COLS = `rig_id, device_token, last_seq, sender_epoch, seq_conflict_at,
                     alarm_active, alarm_p1, alarm_highest, active_job`;
 
-async function ensureRig(client, rigId, token, schemaVersion) {
+async function ensureRig(client, rigId, token, schemaVersion, sharedTokens = [GLOBAL_INGEST_TOKEN]) {
     // FOR NO KEY UPDATE: ensureRig is reached only when the transaction's opening
     // locked SELECT found no row, but a concurrent first-contact transaction may
     // have committed the rig in between. Returning that row UNLOCKED let the rest
@@ -126,7 +126,7 @@ async function ensureRig(client, rigId, token, schemaVersion) {
     // share one secret — and it hides them from `provision-rigs.js`, which skips
     // rigs that already have a token. Leave it NULL so the rig keeps using the
     // shared fallback until a real per-rig token is issued.
-    const perRigToken = token && token !== GLOBAL_INGEST_TOKEN ? token : null;
+    const perRigToken = token && !sharedTokens.includes(token) ? token : null;
     // RETURNING tells the truth about whether WE created the row. ON CONFLICT DO
     // NOTHING with an unconditional `_new: true` reported a fresh registration —
     // and fired the registration audit — even when a concurrent transaction had
@@ -178,12 +178,20 @@ function authorize(rig, token) {
 // unknown rig first (audit #1: only auto-register authorized devices). When a
 // device_token has been provisioned for an existing rig, that wins; otherwise we
 // fall back to the global INGEST_TOKEN / open-demo policy.
-function authorizeKnown(rig, token) {
+function authorizeKnown(rig, token, sharedTokens = [GLOBAL_INGEST_TOKEN]) {
     // Same precedence as authorize(): per-rig credential wins, shared token is
     // only the not-yet-provisioned fallback.
     if (rig && rig.device_token) return safeEqual(token, rig.device_token);
-    if (GLOBAL_INGEST_TOKEN) return safeEqual(token, GLOBAL_INGEST_TOKEN);
+    const shared = sharedTokens.filter(Boolean);
+    if (shared.length) return shared.map((t) => safeEqual(token, t)).includes(true);
     return ALLOW_OPEN_INGEST;
+}
+
+// Shared (fleet-wide) fallback tokens for this caller: always INGEST_TOKEN, plus
+// any transport-specific shared token the caller authenticated against (the ETP
+// server token), so a rig admitted with it is not then rejected batch by batch.
+function sharedTokensFor(ctx) {
+    return [...new Set([GLOBAL_INGEST_TOKEN, ...((ctx && ctx.sharedTokens) || [])].filter(Boolean))];
 }
 
 // Rows per INSERT statement. One giant UNNEST over an unbounded replay drain
@@ -848,7 +856,8 @@ async function ingestBatch(ctx, batch) {
     return last;
 }
 
-async function ingestBatchOnce({ rigId, token, schemaVersion }, batch, nowIso) {
+async function ingestBatchOnce({ rigId, token, schemaVersion, sharedTokens: extraShared }, batch, nowIso) {
+    const sharedTokens = sharedTokensFor({ sharedTokens: extraShared });
     rigId = batch.deviceId || rigId;
     if (!rigId) return { ok: false, code: 400, error: 'missing deviceId' };
     // Bound the identity: rigId flows into the rigs PK, Prometheus label values,
@@ -932,21 +941,21 @@ async function ingestBatchOnce({ rigId, token, schemaVersion }, batch, nowIso) {
              FOR NO KEY UPDATE`, [rigId]);
         let rig = existing[0] || null;
 
-        if (!authorizeKnown(rig, token)) {
+        if (!authorizeKnown(rig, token, sharedTokens)) {
             await client.query('ROLLBACK').catch(() => {});
             return { ok: false, code: 401, error: 'unauthorized device' };
         }
 
         // Authorized: now it is safe to auto-register an unknown device.
         if (!rig) {
-            const r = await ensureRig(client, rigId, token, schemaVersion || batch.schemaVersion);
+            const r = await ensureRig(client, rigId, token, schemaVersion || batch.schemaVersion, sharedTokens);
             rig = r;
             registered = !!r._new;
             // Registration race: another transaction created this rig first and
             // ensureRig returned ITS row. The earlier authorize ran against a
             // null rig (shared-token path); the real row may carry a provisioned
             // device_token that must now be honoured.
-            if (!r._new && !authorizeKnown(rig, token)) {
+            if (!r._new && !authorizeKnown(rig, token, sharedTokens)) {
                 await client.query('ROLLBACK').catch(() => {});
                 return { ok: false, code: 401, error: 'unauthorized device' };
             }
